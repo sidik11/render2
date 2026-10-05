@@ -1279,7 +1279,9 @@ function serveStatic(req,res) {
 
 const server=http.createServer(async(req,res)=>{
   try {
-    if(req.url === '/health' && req.method === 'GET') return send(res,200,{ok:true,status:'online',server:'server2',timestamp:nowIso()});
+    if(req.method==='GET' && (req.url==='/health' || req.url==='/api/health')){
+      return send(res,200,{ok:true,status:'online',server:'server2',timestamp:nowIso()});
+    }
     if(req.url.startsWith('/api/')) return await route(req,res);
     send(res,404,{error:'Not found.'});
   } catch(e) {
