@@ -342,7 +342,7 @@ async function currentUser(req,roles){
   const portal=String(req.headers['x-cem-portal']||'student').toLowerCase();
   const token=getSessionToken(req,portal);
   if(!token)throw Object.assign(new Error('Please log in.'),{status:401});
-  const target=new URL(process.env.SERVER1_URL||'http://127.0.0.1:3000');
+  const target=new URL(SERVER1_URL || 'http://127.0.0.1:3000');
   const payload=JSON.stringify({});
   const user=await new Promise((resolve,reject)=>{
     const transport=target.protocol==='https:'?https:http;
@@ -433,9 +433,38 @@ function csrfCookieBase(req){return 'Path=/; '+(isHttps(req)?'Secure; ':'')+'Sam
 function createCsrfToken(){const random=crypto.randomBytes(32).toString('base64url');const sig=crypto.createHmac('sha256',AUTH_SESSION_SECRET).update('csrf|'+random).digest('base64url');return random+'.'+sig;}
 function setCsrfCookie(res,token){res.setHeader('Set-Cookie',(res.getHeader('Set-Cookie')||[]).concat(['cem_csrf='+encodeURIComponent(token)+'; '+csrfCookieBase(res.req)]));}
 function validCsrfToken(token){const parts=String(token||'').split('.');if(parts.length!==2||!/^[A-Za-z0-9_-]{32,100}$/.test(parts[0]))return false;const expected=crypto.createHmac('sha256',AUTH_SESSION_SECRET).update('csrf|'+parts[0]).digest('base64url');return parts[1].length===expected.length&&crypto.timingSafeEqual(Buffer.from(parts[1]),Buffer.from(expected));}
-function validateCsrf(req){const origin=String(req.headers.origin||'').trim();const referer=String(req.headers.referer||'').trim();const proto=String(req.headers['x-forwarded-proto']|| (isHttps(req)?'https':'http')).split(',')[0].trim();const host=String(req.headers['x-forwarded-host']||req.headers.host||'').split(',')[0].trim();const target=proto+'://'+host;const source=origin|| (referer?(()=>{try{return new URL(referer).origin}catch(_){return ''}})():'');if(source && source!==target)throw Object.assign(new Error('Cross-site request blocked.'),{status:403});if(String(req.headers['sec-fetch-site']||'').toLowerCase()==='cross-site')throw Object.assign(new Error('Cross-site request blocked.'),{status:403});const cookies=parseCookies(req),cookie=decodeURIComponent(String(cookies.cem_csrf||'')),header=String(req.headers['x-csrf-token']||'');if(!cookie||!header||cookie!==header||!validCsrfToken(header))throw Object.assign(new Error('CSRF validation failed. Refresh the page and try again.'),{status:403});}
+function validateCsrf(req){
+  const origin=String(req.headers.origin||'').trim().replace(/\/$/, '');
+  const referer=String(req.headers.referer||'').trim();
+  const proto=String(req.headers['x-forwarded-proto']|| (isHttps(req)?'https':'http')).split(',')[0].trim();
+  const host=String(req.headers['x-forwarded-host']||req.headers.host||'').split(',')[0].trim();
+  const target=proto+'://'+host;
+  const configured=configuredCorsOrigins();
+  const source=origin || (referer?(()=>{try{return new URL(referer).origin.replace(/\/$/, '')}catch(_){return ''}})():'');
+  if(source && source!==target && !configured.includes(source)) throw Object.assign(new Error('Cross-site request blocked.'),{status:403});
+  if(String(req.headers['sec-fetch-site']||'').toLowerCase()==='cross-site' && !configured.includes(source)) throw Object.assign(new Error('Cross-site request blocked.'),{status:403});
+  const cookies=parseCookies(req),cookie=decodeURIComponent(String(cookies.cem_csrf||'')),header=String(req.headers['x-csrf-token']||'');
+  if(!cookie||!header||cookie!==header||!validCsrfToken(header)) throw Object.assign(new Error('CSRF validation failed. Refresh the page and try again.'),{status:403});
+}
 function securityHeaders(req){const h={'X-Content-Type-Options':'nosniff','X-Frame-Options':'SAMEORIGIN','Referrer-Policy':'strict-origin-when-cross-origin','Permissions-Policy':'camera=(), microphone=(), geolocation=(), payment=(self "https://checkout.razorpay.com")','Cross-Origin-Opener-Policy':'same-origin','Cross-Origin-Resource-Policy':'same-origin','X-DNS-Prefetch-Control':'off','X-Permitted-Cross-Domain-Policies':'none','Content-Security-Policy':"default-src 'self'; script-src 'self' 'unsafe-inline' https://checkout.razorpay.com https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://api.razorpay.com; frame-src https://checkout.razorpay.com https://api.razorpay.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"};if(isHttps(req))h['Strict-Transport-Security']='max-age=31536000; includeSubDomains';return h;}
-function send(res,status,data){const h=securityHeaders(res.req);Object.assign(h,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','Access-Control-Allow-Origin':'null','Access-Control-Allow-Headers':'Content-Type, Authorization, X-CEM-Portal, X-CSRF-Token','Access-Control-Allow-Methods':'GET,POST,PUT,DELETE,OPTIONS'});res.writeHead(status,h);res.end(JSON.stringify(data));}
+function configuredCorsOrigins(){
+  return String(process.env.FRONTEND_ORIGINS || process.env.FRONTEND_ORIGIN || '')
+    .split(',').map(v=>v.trim().replace(/\/$/, '')).filter(Boolean);
+}
+function applyCors(req, headers){
+  const origin=String(req.headers.origin||'').trim().replace(/\/$/, '');
+  const allowed=configuredCorsOrigins();
+  if(origin && allowed.includes(origin)){
+    headers['Access-Control-Allow-Origin']=origin;
+    headers['Access-Control-Allow-Credentials']='true';
+    headers['Vary']='Origin';
+  }
+  headers['Access-Control-Allow-Headers']='Content-Type, Authorization, X-CEM-Portal, X-CSRF-Token, X-Internal-Auth';
+  headers['Access-Control-Allow-Methods']='GET,POST,PUT,DELETE,OPTIONS';
+  headers['Access-Control-Max-Age']='600';
+  return headers;
+}
+function send(res,status,data){const h=applyCors(res.req,securityHeaders(res.req));Object.assign(h,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.writeHead(status,h);res.end(JSON.stringify(data));}
 
 function errorStatus(e){ return Number(e.status)||500; }
 
@@ -519,8 +548,8 @@ async function activateOrder(order, paymentId, paidAt) {
 async function route(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const method = req.method;
-  if (process.env.SERVER_ROLE === 'exam' && !(url.pathname==='/api/health' || url.pathname==='/api/auth/csrf' || url.pathname==='/api/internal/auth/verify' || url.pathname==='/api/tests' || url.pathname.startsWith('/api/tests/') || url.pathname==='/api/admin/ratings')) return send(res,404,{error:'This endpoint belongs to Server 1.'});
   if (method==='OPTIONS') return send(res,204,{});
+  if (process.env.SERVER_ROLE === 'exam' && !(url.pathname==='/api/health' || url.pathname==='/api/auth/csrf' || url.pathname==='/api/internal/auth/verify' || url.pathname==='/api/tests' || url.pathname.startsWith('/api/tests/') || url.pathname==='/api/admin/ratings')) return send(res,404,{error:'This endpoint belongs to Server 1.'});
   if (url.pathname==='/api/auth/csrf' && method==='GET') { const token=createCsrfToken(); setCsrfCookie(res,token); return send(res,200,{csrfToken:token}); }
   if (url.pathname.startsWith('/api/') && method!=='GET' && url.pathname!=='/api/webhook' && url.pathname!=='/api/internal/auth/verify') { rateLimit(req,'api-global',180,60000); validateCsrf(req); }
 
@@ -1210,8 +1239,8 @@ function serveStatic(req,res) {
 }
 
 const server=http.createServer(async(req,res)=>{
-  server.headersTimeout=65000; server.requestTimeout=120000; server.keepAliveTimeout=5000;
   try {
+    if(req.url === '/health' && req.method === 'GET') return send(res,200,{ok:true,status:'online',server:'server2',timestamp:nowIso()});
     if(req.url.startsWith('/api/')) return await route(req,res);
     send(res,404,{error:'Not found.'});
   } catch(e) {
@@ -1222,9 +1251,18 @@ const server=http.createServer(async(req,res)=>{
 
 (async()=>{
   await ensureSeeds();
+  server.headersTimeout=65000;
+  server.requestTimeout=120000;
+  server.keepAliveTimeout=5000;
+  server.on('error', err => {
+    console.error('[Server] Fatal listen/runtime error:', err);
+    process.exitCode = 1;
+  });
   server.listen(CFG.port, '0.0.0.0', () => {
-    console.log('Competitive Exam Master server running on port ' + CFG.port + ' (0.0.0.0)');
-    console.log('Student Portal: http://localhost:' + CFG.port + '/student');
-    console.log('Admin Portal:   http://localhost:' + CFG.port + '/admin');
+    console.log('Competitive Exam Master Server 2 running on port ' + CFG.port + ' (0.0.0.0)');
+    console.log('[Server 2] Health: /health and /api/health');
+    console.log('[Server 2] Server 1 target:', SERVER1_URL);
+    console.log('[Server 2] CORS origins:', configuredCorsOrigins().join(', ') || '(none configured)');
+    void pingServer1();
   });
 })();
