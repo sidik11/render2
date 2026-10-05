@@ -364,53 +364,71 @@ async function currentUser(req,roles){
   if(!token)throw Object.assign(new Error('Please log in.'),{status:401});
   const target=new URL(SERVER1_URL || 'https://server1-osjo.onrender.com');
   if(!['http:','https:'].includes(target.protocol)) throw Object.assign(new Error('Invalid SERVER1_URL.'),{status:500});
-  const payload=JSON.stringify({});
-  const user=await new Promise((resolve,reject)=>{
-    const transport=target.protocol==='https:'?https:http;
-    const cookieName=portal==='admin'?'cem_admin_session':'cem_user_session';
-    const headers={
-      'Content-Type':'application/json',
-      'Content-Length':Buffer.byteLength(payload),
-      'Cookie':cookieName+'='+encodeURIComponent(token),
-      'X-CEM-Portal':portal,
-      'X-Internal-Auth':String(process.env.INTERNAL_AUTH_SECRET||''),
-      'User-Agent':'CompetitiveExamMaster-Server2/1.0'
-    };
-    const q=transport.request({
-      hostname:target.hostname,
-      port:target.port||(target.protocol==='https:'?443:80),
-      path:'/api/internal/auth/verify',
-      method:'POST',
-      headers
-    },r=>{
-      let d='';
-      r.setEncoding('utf8');
-      r.on('data',c=>d+=c);
-      r.on('end',()=>{
-        const raw=String(d||'').trim();
-        let j=null;
-        try{ j=raw?JSON.parse(raw):{}; }
-        catch(_){
-          console.error('[AuthBridge] Server1 returned non-JSON:',r.statusCode,raw.slice(0,300));
-          return reject(Object.assign(new Error('Server1 authentication service returned an invalid response.'),{status:502}));
-        }
-        if(r.statusCode>=200&&r.statusCode<300){
-          if(!j.user) return reject(Object.assign(new Error('Server1 authentication response is missing user data.'),{status:502}));
-          return resolve(j.user);
-        }
-        return reject(Object.assign(new Error(j.error||('Server1 authentication failed (HTTP '+r.statusCode+').')),{status:r.statusCode||502}));
-      });
-    });
-    q.setTimeout(10000,()=>q.destroy(Object.assign(new Error('Server1 authentication request timed out.'),{code:'ETIMEDOUT'})));
-    q.on('error',reject);
-    q.write(payload);
-    q.end();
-  });
-  if(!user)throw Object.assign(new Error('Please log in.'),{status:401});
-  if(roles&&!roles.includes(user.role))throw Object.assign(new Error('Not authorized.'),{status:403});
-  return {uid:user.uid,decoded:user,user};
-}
+  const cookieName=portal==='admin'?'cem_admin_session':'cem_user_session';
+  const cookie=cookieName+'='+encodeURIComponent(token);
+  let lastError=null;
 
+  for(let attempt=1;attempt<=3;attempt++){
+    try{
+      const controller=new AbortController();
+      const timeout=setTimeout(()=>controller.abort(),10000);
+      let response;
+      try{
+        response=await fetch(new URL('/api/internal/auth/verify',target).toString(),{
+          method:'POST',
+          headers:{
+            'Content-Type':'application/json',
+            'Cookie':cookie,
+            'X-CEM-Portal':portal,
+            'X-Internal-Auth':String(process.env.INTERNAL_AUTH_SECRET||''),
+            'User-Agent':'CompetitiveExamMaster-Server2/1.0'
+          },
+          body:'{}',
+          redirect:'follow',
+          cache:'no-store',
+          signal:controller.signal
+        });
+      }finally{
+        clearTimeout(timeout);
+      }
+
+      const raw=await response.text();
+      let j=null;
+      try{j=raw?JSON.parse(raw):{};}
+      catch(_){
+        const detail='Server1 returned non-JSON (HTTP '+response.status+', '+String(response.headers.get('content-type')||'unknown')+'): '+raw.slice(0,180);
+        lastError=Object.assign(new Error(detail),{status:502});
+        if(attempt<3){await new Promise(r=>setTimeout(r,500*attempt));continue;}
+        throw lastError;
+      }
+
+      if(response.ok){
+        if(!j.user)throw Object.assign(new Error('Server1 authentication response is missing user data.'),{status:502});
+        const user=j.user;
+        if(roles&&!roles.includes(user.role))throw Object.assign(new Error('Not authorized.'),{status:403});
+        return {uid:user.uid,decoded:user,user};
+      }
+
+      const status=response.status||502;
+      const err=Object.assign(new Error(j.error||('Server1 authentication failed (HTTP '+status+').')),{status});
+      if([502,503,504].includes(status)&&attempt<3){
+        lastError=err;
+        await new Promise(r=>setTimeout(r,500*attempt));
+        continue;
+      }
+      throw err;
+    }catch(e){
+      if(e?.name==='AbortError')lastError=Object.assign(new Error('Server1 authentication request timed out.'),{status:504});
+      else lastError=e;
+      if(attempt<3&&[502,503,504].includes(Number(lastError?.status)||0)){
+        await new Promise(r=>setTimeout(r,500*attempt));
+        continue;
+      }
+      throw lastError;
+    }
+  }
+  throw lastError||Object.assign(new Error('Server1 authentication failed.'),{status:502});
+}
 function requireRole(req, role) { return currentUser(req, [role]); }
 
 async function sendEmail(to, subject, html, text='') {
