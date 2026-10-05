@@ -927,10 +927,14 @@ async function route(req, res) {
   if(mTest && method==='GET' && mTest[2]==='solution'){
     const {user}=await currentUser(req), tests=await allMap('tests'), t=tests[decodeURIComponent(mTest[1])];
     if(!t) throw new Error('Test not found.');
-    const submissions=Object.values(await allMap('submissions')).filter(s=>s.testId===t.id&&s.userId===user.uid);
+    const submissions=Object.values(await allMap('submissions'))
+      .filter(s=>s&&s.testId===t.id&&s.userId===user.uid)
+      .sort((a,b)=>new Date(a.submittedAt||0)-new Date(b.submittedAt||0));
     const saved=submissions.at(-1);
     if(!saved) throw new Error('Attempt this test first to view its solution.');
-    return send(res,200,await calculateResult(t,saved.answers||{},saved.timeBySubject||{},false,user,true));
+    const result=await calculateResult(t,saved.answers||{},saved.timeBySubject||{},false,user,true,saved.id||saved.submissionId||'');
+    result.attemptNumber=submissions.length;
+    return send(res,200,result);
   }
   if(mTest&&method==='POST'&&mTest[2]==='submit'){
     const {user}=await currentUser(req),tests=await allMap('tests'),t=tests[decodeURIComponent(mTest[1])];if(!t)throw new Error('Test not found.');
@@ -1216,16 +1220,42 @@ async function route(req, res) {
   }
 
   if(url.pathname==='/api/tests/rating'&&method==='POST'){
-    const {user}=await requireRole(req,'student'),b=await body(req),testId=String(b.testId||''),rating=Number(b.rating),feedback=String(b.feedback||'').trim().slice(0,1000);
+    const {user}=await requireRole(req,'student'),b=await body(req),testId=String(b.testId||''),submissionId=String(b.submissionId||'').trim(),rating=Number(b.rating),feedback=String(b.feedback||'').trim().slice(0,1000);
     if(!testId||!Number.isInteger(rating)||rating<1||rating>5)throw new Error('Choose a rating from 1 to 5 stars.');
     const t=(await allMap('tests'))[testId];if(!t)throw new Error('Test not found.');
-    const submissions=Object.values(await allMap('submissions')).filter(x=>x.testId===testId&&x.userId===user.uid);if(!submissions.length)throw Object.assign(new Error('Complete the test before rating it.'),{status:403});
-    const ratings=await allMap('ratings'),existing=Object.values(ratings).find(x=>x.testId===testId&&x.userId===user.uid),row=existing||{id:uid('rate-'),testId,testTitle:t.title,userId:user.uid,userName:user.name,createdAt:nowIso()};
-    row.rating=rating;row.feedback=feedback;row.updatedAt=nowIso();await set('ratings/'+row.id,row);return send(res,200,{message:existing?'Rating updated.':'Thanks for rating this test.',rating:publicRating(row)});
+    const submissions=Object.values(await allMap('submissions'))
+      .filter(x=>x&&x.testId===testId&&x.userId===user.uid)
+      .sort((a,b)=>new Date(a.submittedAt||0)-new Date(b.submittedAt||0));
+    if(!submissions.length)throw Object.assign(new Error('Complete the test before rating it.'),{status:403});
+    const target=submissionId
+      ? submissions.find(x=>String(x.id||x.submissionId||'')===submissionId)
+      : submissions.at(-1);
+    if(!target)throw Object.assign(new Error('That test attempt could not be found. Please open the latest result and try again.'),{status:400});
+    const targetId=String(target.id||target.submissionId||'').trim();
+    const ratings=await allMap('ratings');
+    const rows=Object.values(ratings).filter(x=>x&&x.testId===testId&&x.userId===user.uid);
+    let existing=rows.find(x=>String(x.submissionId||'')===targetId);
+    // Backward compatibility: an old single rating without submissionId belongs
+    // to the user's first/only recorded attempt, not to every future reattempt.
+    if(!existing && submissions.length===1) existing=rows.find(x=>!x.submissionId);
+    if(existing)throw Object.assign(new Error('You have already submitted feedback for this attempt. Re-attempt the test before submitting feedback again.'),{status:409});
+    const row={
+      id:uid('rate-'),testId,testTitle:t.title,userId:user.uid,userName:user.name,
+      submissionId:targetId,attemptNumber:submissions.findIndex(x=>String(x.id||x.submissionId||'')===targetId)+1,
+      rating,feedback,createdAt:nowIso(),updatedAt:nowIso()
+    };
+    await set('ratings/'+row.id,row);
+    return send(res,200,{message:'Thanks for your feedback.',rating:publicRating(row)});
   }
   if(url.pathname==='/api/tests/ratings/mine'&&method==='GET'){
-    const {user}=await requireRole(req,'student'),testId=String(url.searchParams.get('testId')||''),ratings=await allMap('ratings');
-    return send(res,200,{rating:publicRating(Object.values(ratings).find(x=>x.testId===testId&&x.userId===user.uid)||null)});
+    const {user}=await requireRole(req,'student'),testId=String(url.searchParams.get('testId')||''),submissionId=String(url.searchParams.get('submissionId')||'').trim(),ratings=await allMap('ratings');
+    const submissions=Object.values(await allMap('submissions'))
+      .filter(x=>x&&x.testId===testId&&x.userId===user.uid)
+      .sort((a,b)=>new Date(a.submittedAt||0)-new Date(b.submittedAt||0));
+    const targetId=submissionId||String(submissions.at(-1)?.id||submissions.at(-1)?.submissionId||'');
+    let rating=targetId?Object.values(ratings).find(x=>x&&x.testId===testId&&x.userId===user.uid&&String(x.submissionId||'')===targetId):null;
+    if(!rating && submissions.length===1) rating=Object.values(ratings).find(x=>x&&x.testId===testId&&x.userId===user.uid&&!x.submissionId)||null;
+    return send(res,200,{rating:publicRating(rating)});
   }
   if(url.pathname==='/api/admin/ratings'&&method==='GET'){
     await requireRole(req,'admin');const ratings=Object.values(await allMap('ratings')).sort((a,b)=>new Date(b.updatedAt||b.createdAt)-new Date(a.updatedAt||a.createdAt));
@@ -1249,7 +1279,7 @@ async function route(req, res) {
   throw Object.assign(new Error('Not found.'),{status:404});
 }
 
-function publicRating(r){return r?{id:r.id,testId:r.testId,testTitle:r.testTitle||'',userId:r.userId,userName:r.userName||'',rating:r.rating,feedback:r.feedback||'',createdAt:r.createdAt,updatedAt:r.updatedAt}:null;}
+function publicRating(r){return r?{id:r.id,testId:r.testId,testTitle:r.testTitle||'',userId:r.userId,userName:r.userName||'',submissionId:r.submissionId||'',attemptNumber:Number(r.attemptNumber)||1,rating:r.rating,feedback:r.feedback||'',createdAt:r.createdAt,updatedAt:r.updatedAt}:null;}
 
 async function calculateResult(t, answers, timeBySubject, saveAttempt, user, solutionMode, submissionId) {
   let score=0,correct=0,incorrect=0,unattempted=0; const sectionMap={};
@@ -1278,7 +1308,7 @@ async function calculateResult(t, answers, timeBySubject, saveAttempt, user, sol
   const rank=allScores.filter(s=>s>score).length+1;
   const below=allScores.filter(s=>s<score).length;
   const percentile=totalAttempts>1?Math.round(below/(totalAttempts-1)*1000)/10:100;
-  return {testId:t.id,title:t.title,score,maxScore,correct,incorrect,unattempted,attempted,total:t.questions.length,accuracy,rank,totalAttempts,percentile,sections,review};
+  return {testId:t.id,title:t.title,submissionId:submissionId||'',score,maxScore,correct,incorrect,unattempted,attempted,total:t.questions.length,accuracy,rank,totalAttempts,percentile,sections,review};
 }
 
 function mimeFile(filePath) {
