@@ -30,7 +30,7 @@ const KEEPALIVE_MS = Math.max(60000, Number(process.env.KEEPALIVE_MS || 300000))
 
 async function pingServer1() {
   try {
-    const response = await fetch(SERVER1_URL + '/api/health', {
+    const response = await fetch(SERVER1_URL + '/health', {
       method: 'GET',
       headers: { 'User-Agent': 'CompetitiveExamMaster-Server2/1.0' }
     });
@@ -362,12 +362,49 @@ async function currentUser(req,roles){
   const portal=String(req.headers['x-cem-portal']||'student').toLowerCase();
   const token=getSessionToken(req,portal);
   if(!token)throw Object.assign(new Error('Please log in.'),{status:401});
-  const target=new URL(SERVER1_URL || 'http://127.0.0.1:3000');
+  const target=new URL(SERVER1_URL || 'https://server1-osjo.onrender.com');
+  if(!['http:','https:'].includes(target.protocol)) throw Object.assign(new Error('Invalid SERVER1_URL.'),{status:500});
   const payload=JSON.stringify({});
   const user=await new Promise((resolve,reject)=>{
     const transport=target.protocol==='https:'?https:http;
-   const q=transport.request({hostname:target.hostname,port:target.port||(target.protocol==='https:'?443:80),path:'/api/internal/auth/verify',method:'POST',headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(payload),'Cookie':(portal==='admin'?'cem_admin_session=':'cem_user_session=')+encodeURIComponent(token),
-        'X-CEM-Portal':portal,'X-Internal-Auth':process.env.INTERNAL_AUTH_SECRET||''}},r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>{try{const j=JSON.parse(d||'{}');if(r.statusCode>=200&&r.statusCode<300)resolve(j.user);else reject(Object.assign(new Error(j.error||'Authentication failed.'),{status:r.statusCode||401}));}catch(e){reject(e);}})});q.on('error',reject);q.write(payload);q.end();
+    const cookieName=portal==='admin'?'cem_admin_session':'cem_user_session';
+    const headers={
+      'Content-Type':'application/json',
+      'Content-Length':Buffer.byteLength(payload),
+      'Cookie':cookieName+'='+encodeURIComponent(token),
+      'X-CEM-Portal':portal,
+      'X-Internal-Auth':String(process.env.INTERNAL_AUTH_SECRET||''),
+      'User-Agent':'CompetitiveExamMaster-Server2/1.0'
+    };
+    const q=transport.request({
+      hostname:target.hostname,
+      port:target.port||(target.protocol==='https:'?443:80),
+      path:'/api/internal/auth/verify',
+      method:'POST',
+      headers
+    },r=>{
+      let d='';
+      r.setEncoding('utf8');
+      r.on('data',c=>d+=c);
+      r.on('end',()=>{
+        const raw=String(d||'').trim();
+        let j=null;
+        try{ j=raw?JSON.parse(raw):{}; }
+        catch(_){
+          console.error('[AuthBridge] Server1 returned non-JSON:',r.statusCode,raw.slice(0,300));
+          return reject(Object.assign(new Error('Server1 authentication service returned an invalid response.'),{status:502}));
+        }
+        if(r.statusCode>=200&&r.statusCode<300){
+          if(!j.user) return reject(Object.assign(new Error('Server1 authentication response is missing user data.'),{status:502}));
+          return resolve(j.user);
+        }
+        return reject(Object.assign(new Error(j.error||('Server1 authentication failed (HTTP '+r.statusCode+').')),{status:r.statusCode||502}));
+      });
+    });
+    q.setTimeout(10000,()=>q.destroy(Object.assign(new Error('Server1 authentication request timed out.'),{code:'ETIMEDOUT'})));
+    q.on('error',reject);
+    q.write(payload);
+    q.end();
   });
   if(!user)throw Object.assign(new Error('Please log in.'),{status:401});
   if(roles&&!roles.includes(user.role))throw Object.assign(new Error('Not authorized.'),{status:403});
