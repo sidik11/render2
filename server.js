@@ -23,6 +23,26 @@ function loadEnv(file = path.join(__dirname, '.env')) {
 loadEnv();
 process.env.SERVER_ROLE='exam';
 
+// Server 1 target and application-level keepalive.
+// Render may still suspend free services; this is not a platform-sleep guarantee.
+const SERVER1_URL = String(process.env.SERVER1_URL || 'https://server1-osjo.onrender.com').trim().replace(/\/$/, '');
+const KEEPALIVE_MS = Math.max(60000, Number(process.env.KEEPALIVE_MS || 300000));
+
+async function pingServer1() {
+  try {
+    const response = await fetch(SERVER1_URL + '/api/health', {
+      method: 'GET',
+      headers: { 'User-Agent': 'CompetitiveExamMaster-Server2/1.0' }
+    });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    console.log('[KeepAlive] Server 1 is alive:', response.status);
+  } catch (err) {
+    console.error('[KeepAlive] Server 1 ping failed:', err.message);
+  }
+}
+
+setInterval(pingServer1, KEEPALIVE_MS).unref();
+
 const CFG = {
   port: Number(process.env.SERVER2_PORT || 3001),
   dbUrl: process.env.SERVER2_FIREBASE_DATABASE_URL || '',
