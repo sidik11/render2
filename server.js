@@ -362,12 +362,47 @@ async function currentUser(req,roles){
   const portal=String(req.headers['x-cem-portal']||'student').toLowerCase();
   const token=getSessionToken(req,portal);
   if(!token)throw Object.assign(new Error('Please log in.'),{status:401});
+
   const target=new URL(SERVER1_URL || 'https://server1-osjo.onrender.com');
   if(!['http:','https:'].includes(target.protocol)) throw Object.assign(new Error('Invalid SERVER1_URL.'),{status:500});
+
   const cookieName=portal==='admin'?'cem_admin_session':'cem_user_session';
   const cookie=cookieName+'='+encodeURIComponent(token);
+
+  async function askServer1(path){
+    const controller=new AbortController();
+    const timeout=setTimeout(()=>controller.abort(),10000);
+    try{
+      const response=await fetch(new URL(path,target).toString(),{
+        method:'GET',
+        headers:{
+          'Cookie':cookie,
+          'X-CEM-Portal':portal,
+          'X-Internal-Auth':String(process.env.INTERNAL_AUTH_SECRET||''),
+          'User-Agent':'CompetitiveExamMaster-Server2/1.0'
+        },
+        redirect:'follow',
+        cache:'no-store',
+        signal:controller.signal
+      });
+      const raw=await response.text();
+      let json=null;
+      try{json=raw?JSON.parse(raw):{};}
+      catch(_){
+        throw Object.assign(new Error('Server1 returned non-JSON (HTTP '+response.status+', '+String(response.headers.get('content-type')||'unknown')+'): '+raw.slice(0,180)),{status:502});
+      }
+      return {response,json};
+    }catch(e){
+      if(e?.name==='AbortError') throw Object.assign(new Error('Server1 authentication request timed out.'),{status:504});
+      throw e;
+    }finally{
+      clearTimeout(timeout);
+    }
+  }
+
   let lastError=null;
 
+  // Preferred internal bridge. Retry transient failures.
   for(let attempt=1;attempt<=3;attempt++){
     try{
       const controller=new AbortController();
@@ -396,8 +431,8 @@ async function currentUser(req,roles){
       let j=null;
       try{j=raw?JSON.parse(raw):{};}
       catch(_){
-        const detail='Server1 returned non-JSON (HTTP '+response.status+', '+String(response.headers.get('content-type')||'unknown')+'): '+raw.slice(0,180);
-        lastError=Object.assign(new Error(detail),{status:502});
+        lastError=Object.assign(new Error('Server1 returned non-JSON (HTTP '+response.status+', '+String(response.headers.get('content-type')||'unknown')+'): '+raw.slice(0,180)),{status:502});
+        if(response.status===404) break;
         if(attempt<3){await new Promise(r=>setTimeout(r,500*attempt));continue;}
         throw lastError;
       }
@@ -410,6 +445,7 @@ async function currentUser(req,roles){
       }
 
       const status=response.status||502;
+      if(status===404) break;
       const err=Object.assign(new Error(j.error||('Server1 authentication failed (HTTP '+status+').')),{status});
       if([502,503,504].includes(status)&&attempt<3){
         lastError=err;
@@ -418,16 +454,32 @@ async function currentUser(req,roles){
       }
       throw err;
     }catch(e){
-      if(e?.name==='AbortError')lastError=Object.assign(new Error('Server1 authentication request timed out.'),{status:504});
-      else lastError=e;
+      lastError=e;
       if(attempt<3&&[502,503,504].includes(Number(lastError?.status)||0)){
         await new Promise(r=>setTimeout(r,500*attempt));
         continue;
       }
-      throw lastError;
+      if(Number(lastError?.status)!==404) throw lastError;
+      break;
     }
   }
-  throw lastError||Object.assign(new Error('Server1 authentication failed.'),{status:502});
+
+  // Compatibility fallback: older Server1 deployments expose /api/auth/me
+  // even when the private internal verification endpoint is not deployed yet.
+  // The session cookie is still verified by Server1 over HTTPS.
+  try{
+    const {response,json}=await askServer1('/api/auth/me');
+    if(response.ok && json.user){
+      const user=json.user;
+      if(roles&&!roles.includes(user.role))throw Object.assign(new Error('Not authorized.'),{status:403});
+      return {uid:user.uid,decoded:user,user};
+    }
+    if(response.ok && !json.user)throw Object.assign(new Error('Please log in.'),{status:401});
+    throw Object.assign(new Error(json.error||('Server1 authentication failed (HTTP '+response.status+').')),{status:response.status||502});
+  }catch(e){
+    if(Number(e?.status)===404 && lastError) throw lastError;
+    throw e;
+  }
 }
 function requireRole(req, role) { return currentUser(req, [role]); }
 
