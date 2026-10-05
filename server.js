@@ -22,6 +22,7 @@ function loadEnv(file = path.join(__dirname, '.env')) {
 }
 loadEnv();
 process.env.SERVER_ROLE='exam';
+const SERVER_BUILD_ID = 'server2-exam-final-2026-10-05';
 
 // Server 1 target and application-level keepalive.
 // Render may still suspend free services; this is not a platform-sleep guarantee.
@@ -279,6 +280,11 @@ async function ensureSeeds() {
   if (!(await get('examAttempts'))) await set('examAttempts',{});
   if (!(await get('scoreIndex'))) await set('scoreIndex',{});
   if (!(await get('ratings'))) await set('ratings',{});
+  if (!(await get('modules'))) {
+    const modules={};
+    DEFAULT_MODULES.forEach((m,i)=>{ modules['m-default-'+(i+1)]={...m,id:'m-default-'+(i+1),createdBy:'system',createdAt:nowIso()}; });
+    await set('modules',modules);
+  }
 }
 
 const AUTH_SESSION_SECRET = process.env.AUTH_SESSION_SECRET || (process.env.NODE_ENV === 'production' ? '' : crypto.randomBytes(32).toString('hex'));
@@ -358,6 +364,30 @@ function publicUser(u) {
 
 function parseCookies(req){const out={};for(const part of String(req.headers.cookie||'').split(';')){const i=part.indexOf('=');if(i>0)out[part.slice(0,i).trim()]=decodeURIComponent(part.slice(i+1).trim());}return out;}
 function getSessionToken(req,portal){const c=parseCookies(req),h=req.headers.authorization||'',p=String(portal||req.headers['x-cem-portal']||'').toLowerCase();if(p==='admin')return c.cem_admin_session||(h.startsWith('Bearer ')?h.slice(7):'');if(p==='student')return c.cem_user_session||(h.startsWith('Bearer ')?h.slice(7):'');return c.cem_user_session||c.cem_admin_session||(h.startsWith('Bearer ')?h.slice(7):'');}
+async function authoritativeModules() {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch(SERVER1_URL + '/api/modules', {
+        method:'GET',
+        headers:{'Accept':'application/json','User-Agent':'CompetitiveExamMaster-Server2/1.0'},
+        signal:controller.signal
+      });
+      const data = await response.json().catch(()=>null);
+      if (!response.ok || !data || !Array.isArray(data.modules)) {
+        throw new Error('Server 1 module API returned HTTP '+response.status);
+      }
+      return data.modules.filter(m=>m && typeof m==='object' && String(m.name||'').trim());
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (err) {
+    console.warn('[Modules] Server 1 module lookup failed; using Server 2 module cache:', err.message);
+    return Object.values(await allMap('modules'));
+  }
+}
+
 async function currentUser(req,roles){
   // Server 2 verifies the signed session locally. Both servers MUST use the
   // same AUTH_SESSION_SECRET. This removes the fragile Server2 -> Server1
@@ -581,7 +611,7 @@ async function route(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const method = req.method;
   if (method==='OPTIONS') return send(res,204,{});
-  if (process.env.SERVER_ROLE === 'exam' && !(url.pathname==='/api/health' || url.pathname==='/api/internal/auth/verify' || url.pathname==='/api/tests' || url.pathname.startsWith('/api/tests/') || url.pathname==='/api/admin/ratings')) return send(res,404,{error:'This endpoint belongs to Server 1.'});
+  if (process.env.SERVER_ROLE === 'exam' && !(url.pathname==='/api/health' || url.pathname==='/api/internal/auth/verify' || url.pathname==='/api/modules' || url.pathname.startsWith('/api/modules/') || url.pathname==='/api/tests' || url.pathname.startsWith('/api/tests/') || url.pathname==='/api/admin/ratings')) return send(res,404,{error:'This endpoint belongs to Server 1.'});
   if (url.pathname.startsWith('/api/') && method!=='GET' && url.pathname!=='/api/webhook' && url.pathname!=='/api/internal/auth/verify') { rateLimit(req,'api-global',180,60000); }
 
   if (url.pathname==='/api/config' && method==='GET') {
@@ -922,15 +952,19 @@ async function route(req, res) {
   if(url.pathname==='/api/tests'&&method==='POST'){
     const {user}=await currentUser(req,['admin','teacher']);
     const b=await body(req);
-    const mods=await allMap('modules');
     const requestedModule=String(b.category ?? b.moduleId ?? b.module ?? '').trim();
-    const selectedModule=Object.values(mods||{}).find(m=>{
+    if(!requestedModule) throw new Error('Please choose a valid exam module.');
+    const mods=await authoritativeModules();
+    const selectedModule=mods.find(m=>{
       if(!m||typeof m!=='object') return false;
       const id=String(m.id||'').trim();
       const name=String(m.name||'').trim();
       return requestedModule===id || (name && name.toLowerCase()===requestedModule.toLowerCase());
     });
-    if(!selectedModule) throw new Error('Please choose a valid exam module.');
+    if(!selectedModule) {
+      console.error('[Tests] Module validation failed:', {requestedModule, availableModules:mods.map(m=>String(m?.name||'').trim()).filter(Boolean)});
+      throw new Error('Please choose a valid exam module.');
+    }
     const categoryName=String(selectedModule.name||'').trim();
     if(!b.title || !Array.isArray(b.questions) || !b.questions.length) throw new Error('Test title and at least one question are required.');
     let subjects=Array.isArray(b.subjects)?b.subjects.map(String).map(s=>s.trim()).filter(Boolean):['General']; subjects=[...new Set(subjects)];
@@ -1280,7 +1314,7 @@ function serveStatic(req,res) {
 const server=http.createServer(async(req,res)=>{
   try {
     if(req.method==='GET' && (req.url==='/health' || req.url==='/api/health')){
-      return send(res,200,{ok:true,status:'online',server:'server2',timestamp:nowIso()});
+      return send(res,200,{ok:true,status:'online',server:'server2',timestamp:nowIso(),build:SERVER_BUILD_ID});
     }
     if(req.url.startsWith('/api/')) return await route(req,res);
     send(res,404,{error:'Not found.'});
