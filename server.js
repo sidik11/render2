@@ -923,7 +923,15 @@ async function route(req, res) {
     const {user}=await currentUser(req,['admin','teacher']);
     const b=await body(req);
     const mods=await allMap('modules');
-    if(!mods || !Object.values(mods).some(m=>m.name===b.category)) throw new Error('Please choose a valid exam module.');
+    const requestedModule=String(b.category ?? b.moduleId ?? b.module ?? '').trim();
+    const selectedModule=Object.values(mods||{}).find(m=>{
+      if(!m||typeof m!=='object') return false;
+      const id=String(m.id||'').trim();
+      const name=String(m.name||'').trim();
+      return requestedModule===id || (name && name.toLowerCase()===requestedModule.toLowerCase());
+    });
+    if(!selectedModule) throw new Error('Please choose a valid exam module.');
+    const categoryName=String(selectedModule.name||'').trim();
     if(!b.title || !Array.isArray(b.questions) || !b.questions.length) throw new Error('Test title and at least one question are required.');
     let subjects=Array.isArray(b.subjects)?b.subjects.map(String).map(s=>s.trim()).filter(Boolean):['General']; subjects=[...new Set(subjects)];
     let languages=Array.isArray(b.languages)?b.languages.map(String).map(s=>s.trim()).filter(Boolean):['English']; languages=[...new Set(languages.length?languages:['English'])];
