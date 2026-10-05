@@ -449,23 +449,6 @@ function isHttps(req){return process.env.NODE_ENV==='production'||String(req.hea
 function cookieBase(res){return 'Path=/; HttpOnly; '+(isHttps(res.req)?'Secure; ':'')+'SameSite=Strict; Max-Age=43200';}
 function setSessionCookie(res,token,portal){const name=portal==='admin'?'cem_admin_session':'cem_user_session';res.setHeader('Set-Cookie',name+'='+encodeURIComponent(token)+'; '+cookieBase(res));}
 function clearSessionCookie(res,portal){const base='Path=/; HttpOnly; '+(isHttps(res.req)?'Secure; ':'')+'SameSite=Strict; Max-Age=0';const names=portal==='admin'?['cem_admin_session']:portal==='student'?['cem_user_session']:['cem_admin_session','cem_user_session'];res.setHeader('Set-Cookie',names.map(n=>n+'=; '+base));}
-function csrfCookieBase(req){return 'Path=/; '+(isHttps(req)?'Secure; ':'')+'SameSite=Strict; Max-Age=43200';}
-function createCsrfToken(){const random=crypto.randomBytes(32).toString('base64url');const sig=crypto.createHmac('sha256',AUTH_SESSION_SECRET).update('csrf|'+random).digest('base64url');return random+'.'+sig;}
-function setCsrfCookie(res,token){res.setHeader('Set-Cookie',(res.getHeader('Set-Cookie')||[]).concat(['cem_csrf='+encodeURIComponent(token)+'; '+csrfCookieBase(res.req)]));}
-function validCsrfToken(token){const parts=String(token||'').split('.');if(parts.length!==2||!/^[A-Za-z0-9_-]{32,100}$/.test(parts[0]))return false;const expected=crypto.createHmac('sha256',AUTH_SESSION_SECRET).update('csrf|'+parts[0]).digest('base64url');return parts[1].length===expected.length&&crypto.timingSafeEqual(Buffer.from(parts[1]),Buffer.from(expected));}
-function validateCsrf(req){
-  const origin=String(req.headers.origin||'').trim().replace(/\/$/, '');
-  const referer=String(req.headers.referer||'').trim();
-  const proto=String(req.headers['x-forwarded-proto']|| (isHttps(req)?'https':'http')).split(',')[0].trim();
-  const host=String(req.headers['x-forwarded-host']||req.headers.host||'').split(',')[0].trim();
-  const target=proto+'://'+host;
-  const configured=configuredCorsOrigins();
-  const source=origin || (referer?(()=>{try{return new URL(referer).origin.replace(/\/$/, '')}catch(_){return ''}})():'');
-  if(source && source!==target && !configured.includes(source)) throw Object.assign(new Error('Cross-site request blocked.'),{status:403});
-  if(String(req.headers['sec-fetch-site']||'').toLowerCase()==='cross-site' && !configured.includes(source)) throw Object.assign(new Error('Cross-site request blocked.'),{status:403});
-  const cookies=parseCookies(req),cookie=decodeURIComponent(String(cookies.cem_csrf||'')),header=String(req.headers['x-csrf-token']||'');
-  if(!cookie||!header||cookie!==header||!validCsrfToken(header)) throw Object.assign(new Error('CSRF validation failed. Refresh the page and try again.'),{status:403});
-}
 function securityHeaders(req){const h={'X-Content-Type-Options':'nosniff','X-Frame-Options':'SAMEORIGIN','Referrer-Policy':'strict-origin-when-cross-origin','Permissions-Policy':'camera=(), microphone=(), geolocation=(), payment=(self "https://checkout.razorpay.com")','Cross-Origin-Opener-Policy':'same-origin','Cross-Origin-Resource-Policy':'same-origin','X-DNS-Prefetch-Control':'off','X-Permitted-Cross-Domain-Policies':'none','Content-Security-Policy':"default-src 'self'; script-src 'self' 'unsafe-inline' https://checkout.razorpay.com https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://api.razorpay.com; frame-src https://checkout.razorpay.com https://api.razorpay.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"};if(isHttps(req))h['Strict-Transport-Security']='max-age=31536000; includeSubDomains';return h;}
 function configuredCorsOrigins(){
   return String(process.env.FRONTEND_ORIGINS || process.env.FRONTEND_ORIGIN || '')
@@ -479,7 +462,7 @@ function applyCors(req, headers){
     headers['Access-Control-Allow-Credentials']='true';
     headers['Vary']='Origin';
   }
-  headers['Access-Control-Allow-Headers']='Content-Type, Authorization, X-CEM-Portal, X-CSRF-Token, X-Internal-Auth';
+  headers['Access-Control-Allow-Headers']='Content-Type, Authorization, X-CEM-Portal, X-Internal-Auth';
   headers['Access-Control-Allow-Methods']='GET,POST,PUT,DELETE,OPTIONS';
   headers['Access-Control-Max-Age']='600';
   return headers;
@@ -569,9 +552,8 @@ async function route(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const method = req.method;
   if (method==='OPTIONS') return send(res,204,{});
-  if (process.env.SERVER_ROLE === 'exam' && !(url.pathname==='/api/health' || url.pathname==='/api/auth/csrf' || url.pathname==='/api/internal/auth/verify' || url.pathname==='/api/tests' || url.pathname.startsWith('/api/tests/') || url.pathname==='/api/admin/ratings')) return send(res,404,{error:'This endpoint belongs to Server 1.'});
-  if (url.pathname==='/api/auth/csrf' && method==='GET') { const token=createCsrfToken(); setCsrfCookie(res,token); return send(res,200,{csrfToken:token}); }
-  if (url.pathname.startsWith('/api/') && method!=='GET' && url.pathname!=='/api/webhook' && url.pathname!=='/api/internal/auth/verify') { rateLimit(req,'api-global',180,60000); validateCsrf(req); }
+  if (process.env.SERVER_ROLE === 'exam' && !(url.pathname==='/api/health' || url.pathname==='/api/internal/auth/verify' || url.pathname==='/api/tests' || url.pathname.startsWith('/api/tests/') || url.pathname==='/api/admin/ratings')) return send(res,404,{error:'This endpoint belongs to Server 1.'});
+  if (url.pathname.startsWith('/api/') && method!=='GET' && url.pathname!=='/api/webhook' && url.pathname!=='/api/internal/auth/verify') { rateLimit(req,'api-global',180,60000); }
 
   if (url.pathname==='/api/config' && method==='GET') {
     return send(res,200,{paymentEnabled:CFG.payment.enabled,paymentMode:CFG.payment.enabled?'test':null,authMode:'manual'});
