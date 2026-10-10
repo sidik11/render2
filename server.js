@@ -922,7 +922,7 @@ async function route(req, res) {
     const attemptId=crypto.randomBytes(24).toString('base64url'), startedAt=Date.now(), durationMs=Math.max(60000,Math.min(Number(t.duration)||30,1440)*60000);
     const attempt={id:attemptId,testId:t.id,userId:user.uid,startedAt:new Date(startedAt).toISOString(),expiresAt:new Date(startedAt+durationMs).toISOString(),status:'active',questionCount:t.questions.length};
     await set('examAttempts/'+attemptId,attempt);
-    return send(res,200,{...summarizeTest(t),attemptId,serverStartedAt:attempt.startedAt,serverExpiresAt:attempt.expiresAt,questions:t.questions.map((q,i)=>({index:i,question:q.question,options:q.options,subject:q.subject||'General',marks:q.marks,negative:q.negative,translations:q.translations||{}}))});
+    return send(res,200,{...summarizeTest(t),attemptId,serverStartedAt:attempt.startedAt,serverExpiresAt:attempt.expiresAt,questions:t.questions.map((q,i)=>({index:i,question:q.question,options:q.options,subject:q.subject||'General',marks:q.marks,negative:q.negative,instructions:q.instructions||'',geometryShape:q.geometryShape||'',translations:q.translations||{}}))});
   }
   if(mTest && method==='GET' && mTest[2]==='solution'){
     const {user}=await currentUser(req), tests=await allMap('tests'), t=tests[decodeURIComponent(mTest[1])];
@@ -982,7 +982,10 @@ async function route(req, res) {
         const tr=q.translations?.[lang];
         if(tr && (tr.question||tr.options?.some(Boolean))) translations[lang]={question:String(tr.question||''),options:[0,1,2,3].map(k=>String(tr.options?.[k]||''))};
       }
-      qs.push({question,options,answer,subject:String(q.subject||'General').trim()||'General',marks:Number.isFinite(Number(q.marks))?Number(q.marks):1,negative:Number.isFinite(Number(q.negative))?Number(q.negative):0,explanation:String(q.explanation||''),translations});
+      const allowedGeometryShapes=new Set(['triangle','right-triangle','circle','square','rectangle','parallelogram','trapezoid','rhombus']);
+      const geometryShape=String(q.geometryShape||'').trim().toLowerCase();
+      if(geometryShape&&!allowedGeometryShapes.has(geometryShape)) throw new Error('Question '+(i+1)+' has an unsupported geometry shape.');
+      qs.push({question,options,answer,subject:String(q.subject||'General').trim()||'General',marks:Number.isFinite(Number(q.marks))?Number(q.marks):1,negative:Number.isFinite(Number(q.negative))?Number(q.negative):0,explanation:String(q.explanation||''),instructions:String(q.instructions||'').trim().slice(0,2000),geometryShape,translations});
     });
     const t={id:uid('T'),title:String(b.title).trim(),exam:String(b.exam||'Competitive Exam').trim(),category:categoryName,subjects,languages,type:String(b.type||'FREE').toUpperCase()==='PAID'?'paid':'free',price:0,duration:Number.parseInt(b.duration,10)||30,questions:qs,questionCount:qs.length,createdBy:user.email,createdById:user.uid,createdAt:nowIso(),published:true,attemptPolicy:b.attemptPolicy==='once'?'once':'reattempt'};
     const tests=await allMap('tests'); tests[t.id]=t; await set('tests',tests);
