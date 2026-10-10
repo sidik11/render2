@@ -520,7 +520,9 @@ async function attemptBlocked(test,user){
 async function body(req) {
   return new Promise((resolve,reject)=>{
     const chunks=[]; let size=0;
-    req.on('data', c=>{ size+=c.length; if(size>5e6){ reject(new Error('Request too large')); req.destroy(); return; } chunks.push(c); });
+    // A test can contain many individually compressed question images; allow a bounded 25 MB payload.
+    const maxBodyBytes=25*1024*1024;
+    req.on('data', c=>{ size+=c.length; if(size>maxBodyBytes){ reject(Object.assign(new Error('Request too large. Keep the complete test under 25 MB.'),{status:413})); req.destroy(); return; } chunks.push(c); });
     req.on('end',()=>{ try{ resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')||'{}')); }catch(e){ reject(new Error('Invalid JSON body.')); }});
     req.on('error',reject);
   });
