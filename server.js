@@ -467,7 +467,7 @@ const emailShell = (title, body) => '<div style="font-family:Arial,sans-serif;ma
 
 function summarizeTest(t) {
   return {
-    id:t.id,title:t.title,exam:t.exam,category:t.category,subjects:t.subjects||['General'],
+    id:t.id,title:t.title,exam:t.exam,category:t.category,subjects:t.subjects||['General'],sectionQuestionCounts:t.sectionQuestionCounts||{},
     languages:t.languages?.length?t.languages:['English'],type:t.type,attemptPolicy:t.attemptPolicy==='once'?'once':'reattempt',
     price:t.price||0,duration:t.duration,questionCount:t.questionCount,createdAt:t.createdAt,published:t.published
   };
@@ -994,6 +994,14 @@ async function route(req, res) {
     const categoryName=String(selectedModule.name||'').trim();
     if(!b.title || !Array.isArray(b.questions) || !b.questions.length) throw new Error('Test title and at least one question are required.');
     let subjects=Array.isArray(b.subjects)?b.subjects.map(String).map(s=>s.trim()).filter(Boolean):['General']; subjects=[...new Set(subjects)];
+    const sectionQuestionCounts={};
+    if(b.sectionQuestionCounts && typeof b.sectionQuestionCounts==='object' && !Array.isArray(b.sectionQuestionCounts)){
+      for(const [rawName,rawCount] of Object.entries(b.sectionQuestionCounts)){
+        const name=String(rawName||'').trim(), count=Number(rawCount);
+        if(!name || !Number.isInteger(count) || count<1 || count>500) throw new Error('Section target counts must be whole numbers from 1 to 500.');
+        sectionQuestionCounts[name]=count;
+      }
+    }
     let languages=Array.isArray(b.languages)?b.languages.map(String).map(s=>s.trim()).filter(Boolean):['English']; languages=[...new Set(languages.length?languages:['English'])];
     const secondary=languages.slice(1), qs=[];
     b.questions.forEach((q,i)=>{
@@ -1008,7 +1016,11 @@ async function route(req, res) {
       if(imageDataUrl && (!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(imageDataUrl) || imageDataUrl.length>520000)) throw new Error('Question '+(i+1)+' image must be a compressed JPEG under 400 KB.');
       qs.push({question,options,answer,subject:String(q.subject||'General').trim()||'General',marks:Number.isFinite(Number(q.marks))?Number(q.marks):1,negative:Number.isFinite(Number(q.negative))?Number(q.negative):0,explanation:String(q.explanation||''),instructions:String(q.instructions||'').trim().slice(0,2000),imageDataUrl,translations});
     });
-    const t={id:uid('T'),title:String(b.title).trim(),exam:String(b.exam||'Competitive Exam').trim(),category:categoryName,subjects,languages,type:String(b.type||'FREE').toUpperCase()==='PAID'?'paid':'free',price:0,duration:Number.parseInt(b.duration,10)||30,questions:qs,questionCount:qs.length,createdBy:user.email,createdById:user.uid,createdAt:nowIso(),published:true,attemptPolicy:b.attemptPolicy==='once'?'once':'reattempt'};
+    for(const [section,target] of Object.entries(sectionQuestionCounts)){
+      const actual=qs.filter(q=>(q.subject||'General')===section).length;
+      if(actual!==target) throw new Error(section+': expected '+target+' questions but received '+actual+'.');
+    }
+    const t={id:uid('T'),title:String(b.title).trim(),exam:String(b.exam||'Competitive Exam').trim(),category:categoryName,subjects,sectionQuestionCounts,languages,type:String(b.type||'FREE').toUpperCase()==='PAID'?'paid':'free',price:0,duration:Number.parseInt(b.duration,10)||30,questions:qs,questionCount:qs.length,createdBy:user.email,createdById:user.uid,createdAt:nowIso(),published:true,attemptPolicy:b.attemptPolicy==='once'?'once':'reattempt'};
     const tests=await allMap('tests'); tests[t.id]=t; await set('tests',tests);
     return send(res,200,{message:'Test Series added successfully and published.',test:summarizeTest(t)});
   }
