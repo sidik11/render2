@@ -480,9 +480,31 @@ async function activeSubscription(uidValue) {
   return subs.sort((a,b)=>new Date(b.expiresAt)-new Date(a.expiresAt))[0] || null;
 }
 
+async function server1ActiveSubscription(studentId) {
+  const secret=String(process.env.INTERNAL_AUTH_SECRET||'');
+  if(!secret) throw Object.assign(new Error('Premium access verification is temporarily unavailable.'),{status:503});
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),5000);
+  try {
+    const response=await fetch(SERVER1_URL+'/api/internal/subscription/active?studentId='+encodeURIComponent(studentId),{
+      method:'GET',
+      headers:{'X-Internal-Auth':secret,'Accept':'application/json'},
+      signal:controller.signal
+    });
+    const payload=await response.json().catch(()=>({}));
+    if(!response.ok || typeof payload.active!=='boolean') throw Object.assign(new Error('Premium access verification is temporarily unavailable.'),{status:503});
+    return payload.active===true;
+  } catch(err) {
+    if(err.status) throw err;
+    throw Object.assign(new Error('Premium access verification is temporarily unavailable. Please retry in a moment.'),{status:503});
+  } finally { clearTimeout(timer); }
+}
+
 async function paidAccessBlocked(test, user) {
   if (test.type !== 'paid' || user.role !== 'student') return false;
-  if (await activeSubscription(user.uid)) return false;
+  // Server 1 owns subscription/payment records; Server 2 has a separate RTDB.
+  // Query the authoritative subscription source instead of trusting stale local copies.
+  if (await server1ActiveSubscription(user.uid)) return false;
   const purchases = Object.values(await allMap('purchases'));
   return !purchases.some(p=>p.testId===test.id && p.studentId===user.uid && p.status==='approved');
 }
