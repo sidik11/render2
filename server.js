@@ -982,7 +982,7 @@ async function route(req, res) {
         const tr=q.translations?.[lang];
         if(tr && (tr.question||tr.options?.some(Boolean))) translations[lang]={question:String(tr.question||''),options:[0,1,2,3].map(k=>String(tr.options?.[k]||''))};
       }
-      const allowedGeometryShapes=new Set(['triangle','right-triangle','circle','square','rectangle','parallelogram','trapezoid','rhombus']);
+      const allowedGeometryShapes=new Set(['triangle','right-triangle','circle','square','rectangle','parallelogram','trapezoid','rhombus','triangle-partition']);
       const geometryShape=String(q.geometryShape||'').trim().toLowerCase();
       if(geometryShape&&!allowedGeometryShapes.has(geometryShape)) throw new Error('Question '+(i+1)+' has an unsupported geometry shape.');
       qs.push({question,options,answer,subject:String(q.subject||'General').trim()||'General',marks:Number.isFinite(Number(q.marks))?Number(q.marks):1,negative:Number.isFinite(Number(q.negative))?Number(q.negative):0,explanation:String(q.explanation||''),instructions:String(q.instructions||'').trim().slice(0,2000),geometryShape,translations});
