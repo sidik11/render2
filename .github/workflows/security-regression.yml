@@ -14,4 +14,5 @@ jobs:
           node-version: 22
       - run: npm ci
       - run: npm run build
+      - run: npx --yes eslint@8.57.1 --no-eslintrc --env es2022,node --global fetch --global AbortController --global URL --rule 'no-undef:error' server.js
       - run: npm test
