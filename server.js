@@ -277,15 +277,11 @@ function ownsTest(user,test) {
 async function migrateLegacyTestOwnership(userId,oldEmail,newEmail) {
   if(cleanEmail(oldEmail)===cleanEmail(newEmail))return;
   const tests=await allMap('tests');
-  let changed=false;
   for(const test of Object.values(tests)){
     if(!test.createdById&&cleanEmail(test.createdBy)===cleanEmail(oldEmail)){
-      test.createdById=userId;
-      test.createdBy=newEmail;
-      changed=true;
+      await update('tests/'+test.id,{createdById:userId,createdBy:newEmail});
     }
   }
-  if(changed)await set('tests',tests);
 }
 
 async function ensureSeeds() {
@@ -312,7 +308,7 @@ function clientIp(req){ return String(req.headers['cf-connecting-ip'] || req.hea
 function rateKeyPart(value){ return crypto.createHash('sha256').update(String(value||'')).digest('hex').slice(0,32); }
 async function rateLimit(req,key,limit,windowMs,identity=''){
   const forwarded=String(req.headers['x-forwarded-for']||'').split(',').map(v=>v.trim()).filter(Boolean);
-  const ip=String(req.headers['cf-connecting-ip']||forwarded[forwarded.length-1]||req.socket.remoteAddress||'unknown').slice(0,80);
+  const ip=String((process.env.TRUST_CLOUDFLARE_IP_HEADER==='1'&&req.headers['cf-connecting-ip'])||forwarded[forwarded.length-1]||req.socket.remoteAddress||'unknown').slice(0,80);
   const bucketKey=key+':'+ip+':'+rateKeyPart(identity);
   const now=Date.now();
   if(db&&!useMemDb){
