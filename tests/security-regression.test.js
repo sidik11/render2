@@ -12,6 +12,10 @@ test('server.js passes Node syntax validation', () => {
   assert.doesNotThrow(() => execFileSync(process.execPath, ['--check', serverPath], { stdio: 'pipe' }));
 });
 
+test('Render-assigned PORT takes precedence over local port defaults', () => {
+  assert.ok(source.includes('port: Number(process.env.PORT || process.env.SERVER2_PORT'));
+});
+
 test('rate limits use Firebase transactions in production', () => {
   assert.match(source, /async function rateLimit\([\s\S]*?transact\(pathName,current=>/);
   assert.doesNotMatch(source, /await await rateLimit\(/);
@@ -37,6 +41,9 @@ if (path.basename(path.dirname(serverPath)) === 'render2') {
     assert.match(source, /\/api\/internal\/subscription\/active/);
     assert.match(source, /INTERNAL_AUTH_SECRET/);
     assert.ok(source.includes('if (await server1ActiveSubscription(user.uid)) return false;'));
+    assert.ok(source.includes("const claim=await transact('examAttempts/'+attemptId,current=>"));
+    assert.ok(source.includes("status:'submitting',submissionId,submitClaimedAt:nowIso()"));
+    assert.ok(source.includes("await update('examAttempts/'+attemptId,{status:'submitted',submissionId,submittedAt:existingSubmission.submittedAt||nowIso()});"));
   });
 } else {
   test('internal verification endpoints reject missing shared secrets', () => {
