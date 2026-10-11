@@ -36,7 +36,7 @@ if (path.basename(path.dirname(serverPath)) === 'render2') {
     assert.match(source, /\/api\/internal\/auth\/verify/);
     assert.match(source, /\/api\/internal\/subscription\/active/);
     assert.match(source, /INTERNAL_AUTH_SECRET/);
-    assert.match(source, /if\(await server1ActiveSubscription\(user\.uid\)\) return false/);
+    assert.match(source, /if\\s*\\(\\s*await server1ActiveSubscription\\(user\\.uid\\)\\) return false/);
   });
 } else {
   test('internal verification endpoints reject missing shared secrets', () => {
