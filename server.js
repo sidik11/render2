@@ -185,6 +185,21 @@ async function update(pathName, value) {
   memUpdate(pathName, value);
 }
 
+async function transact(pathName, updater) {
+  if (!useMemDb && db) {
+    try { return await db.ref(pathName).transaction(updater, undefined, false); }
+    catch (err) {
+      console.error('[DB Error] Transaction failed for ' + pathName + ':', err.message);
+      throw Object.assign(new Error('Data storage is temporarily unavailable. Please try again.'), { status:503 });
+    }
+  }
+  const current = await get(pathName);
+  const next = updater(current);
+  if (next === undefined) return { committed:false, snapshot:{ val:()=>current } };
+  await set(pathName, next);
+  return { committed:true, snapshot:{ val:()=>next } };
+}
+
 async function multiUpdate(values){
   if(!values||typeof values!=='object')return;
   if(!useMemDb&&db){try{await db.ref().update(values);}catch(err){console.error('[DB Error] Multi-update failed:',err.message);throw Object.assign(new Error('Data storage is temporarily unavailable. No changes were saved.'),{status:503});}return;}
@@ -295,7 +310,26 @@ const adminOtpState = { hash:'', expiresAt:0, attempts:0, sentAt:0 };
 const rateBuckets = new Map();
 function clientIp(req){ return String(req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim().slice(0,80); }
 function rateKeyPart(value){ return crypto.createHash('sha256').update(String(value||'')).digest('hex').slice(0,32); }
-function rateLimit(req,key,limit,windowMs,identity=''){const k=key+':'+clientIp(req)+':'+rateKeyPart(identity),now=Date.now(),b=rateBuckets.get(k);if(!b||now-b.start>=windowMs){rateBuckets.set(k,{start:now,count:1});return;}b.count++;if(b.count>limit)throw Object.assign(new Error('Too many requests. Please wait and try again.'),{status:429});}
+async function rateLimit(req,key,limit,windowMs,identity=''){
+  const forwarded=String(req.headers['x-forwarded-for']||'').split(',').map(v=>v.trim()).filter(Boolean);
+  const ip=String(req.headers['cf-connecting-ip']||forwarded[forwarded.length-1]||req.socket.remoteAddress||'unknown').slice(0,80);
+  const bucketKey=key+':'+ip+':'+rateKeyPart(identity);
+  const now=Date.now();
+  if(db&&!useMemDb){
+    const pathName='rateLimits/'+crypto.createHash('sha256').update(bucketKey).digest('hex');
+    const tx=await transact(pathName,current=>{
+      if(!current||now-Number(current.start)>=windowMs)return {start:now,count:1};
+      if(Number(current.count)>=limit)return;
+      return {start:Number(current.start),count:Number(current.count||0)+1};
+    });
+    if(!tx.committed)throw Object.assign(new Error('Too many requests. Please wait and try again.'),{status:429});
+    return;
+  }
+  const current=rateBuckets.get(bucketKey);
+  if(!current||now-current.start>=windowMs){rateBuckets.set(bucketKey,{start:now,count:1});return;}
+  if(current.count>=limit)throw Object.assign(new Error('Too many requests. Please wait and try again.'),{status:429});
+  current.count++;
+}
 setInterval(()=>{const cutoff=Date.now()-3600000;for(const [k,v] of rateBuckets)if(v.start<cutoff)rateBuckets.delete(k);},900000).unref();
 
 function hashAdminOtp(otp) {
@@ -476,7 +510,7 @@ function summarizeTest(t) {
 async function allMap(name) { return (await get(name)) || {}; }
 
 async function activeSubscription(uidValue) {
-  const subs = Object.values(await allMap('subscriptions')).filter(s => s.studentId===uidValue && s.status==='approved' && new Date(s.expiresAt).getTime()>Date.now());
+  const subs = Object.values(await allMap('subscriptions')).filter(s => String(s.studentId)===String(uidValue) && s.status==='approved' && Number.isFinite(Date.parse(s.expiresAt)) && Date.parse(s.expiresAt)>Date.now());
   return subs.sort((a,b)=>new Date(b.expiresAt)-new Date(a.expiresAt))[0] || null;
 }
 
@@ -636,7 +670,7 @@ async function route(req, res) {
   const method = req.method;
   if (method==='OPTIONS') return send(res,204,{});
   if (process.env.SERVER_ROLE === 'exam' && !(url.pathname==='/api/health' || url.pathname==='/api/internal/auth/verify' || url.pathname==='/api/modules' || url.pathname.startsWith('/api/modules/') || url.pathname==='/api/tests' || url.pathname.startsWith('/api/tests/') || url.pathname==='/api/admin/ratings')) return send(res,404,{error:'This endpoint belongs to Server 1.'});
-  if (url.pathname.startsWith('/api/') && method!=='GET' && url.pathname!=='/api/webhook' && url.pathname!=='/api/internal/auth/verify') { rateLimit(req,'api-global',180,60000); }
+  if (url.pathname.startsWith('/api/') && method!=='GET' && url.pathname!=='/api/webhook' && url.pathname!=='/api/internal/auth/verify') { await rateLimit(req,'api-global',180,60000); }
 
   if (url.pathname==='/api/config' && method==='GET') {
     return send(res,200,{paymentEnabled:CFG.payment.enabled,paymentMode:CFG.payment.enabled?'test':null,authMode:'manual'});
@@ -646,7 +680,7 @@ async function route(req, res) {
   }
 
   if (url.pathname==='/api/admin/request-otp' && method==='POST') {
-    const b=await body(req), email=cleanEmail(b.email); rateLimit(req,'admin-otp',5,900000,email);
+    const b=await body(req), email=cleanEmail(b.email); await rateLimit(req,'admin-otp',5,900000,email);
     if(email!==CFG.admin.email) throw Object.assign(new Error('This email is not authorized for Admin access.'),{status:403});
     if(Date.now()-adminOtpState.sentAt < 60*1000) throw Object.assign(new Error('Please wait 60 seconds before requesting another OTP.'),{status:429});
     const otp=String(crypto.randomInt(100000,1000000));
@@ -670,7 +704,7 @@ async function route(req, res) {
   }
 
   if (url.pathname==='/api/admin/verify-otp' && method==='POST') {
-    const b=await body(req), email=cleanEmail(b.email), otp=String(b.otp||'').trim(); rateLimit(req,'admin-otp-verify',10,900000,email);
+    const b=await body(req), email=cleanEmail(b.email), otp=String(b.otp||'').trim(); await rateLimit(req,'admin-otp-verify',10,900000,email);
     if(email!==CFG.admin.email) throw Object.assign(new Error('This email is not authorized for Admin access.'),{status:403});
     if(!/^\d{6}$/.test(otp) || !adminOtpState.hash || Date.now()>adminOtpState.expiresAt) throw Object.assign(new Error('OTP is invalid or expired. Request a new OTP.'),{status:401});
     adminOtpState.attempts++;
@@ -694,7 +728,7 @@ async function route(req, res) {
   }
 
   if(url.pathname==='/api/auth/register/student'&&method==='POST'){
-    const b=await body(req),uidVal=uid('std-'),emailVal=cleanEmail(b.email); rateLimit(req,'register-email',6,3600000,emailVal),name=String(b.name||'').trim(),mobile=String(b.mobile||'').trim(),password=String(b.password||'');
+    const b=await body(req),uidVal=uid('std-'),emailVal=cleanEmail(b.email); await rateLimit(req,'register-email',6,3600000,emailVal),name=String(b.name||'').trim(),mobile=String(b.mobile||'').trim(),password=String(b.password||'');
     if(!name||!EMAIL_RE.test(emailVal)||!mobile||!MOBILE_RE.test(mobile))throw new Error('Please provide a valid name, email and mobile number.');
     if(password.length<8||!/[A-Z]/.test(password)||!/[a-z]/.test(password)||!/[0-9]/.test(password))throw new Error('Password must contain at least 8 characters with uppercase, lowercase and a number.');
     const users=Object.values(await allMap('users'));if(users.some(u=>cleanEmail(u.email)===emailVal))throw new Error('This email is already registered.');
@@ -702,7 +736,7 @@ async function route(req, res) {
     await set('users/'+uidVal,profile);return send(res,200,{message:'Student account created. Please sign in to continue.',user:publicUser(profile)});
   }
   if(url.pathname==='/api/auth/register/teacher'&&method==='POST'){
-    const b=await body(req),uidVal=uid('tch-'),emailVal=cleanEmail(b.email); rateLimit(req,'register-email',6,3600000,emailVal),name=String(b.name||'').trim(),mobile=String(b.mobile||'').trim(),subject=String(b.subject||'').trim(),password=String(b.password||'');
+    const b=await body(req),uidVal=uid('tch-'),emailVal=cleanEmail(b.email); await rateLimit(req,'register-email',6,3600000,emailVal),name=String(b.name||'').trim(),mobile=String(b.mobile||'').trim(),subject=String(b.subject||'').trim(),password=String(b.password||'');
     if(!name||!EMAIL_RE.test(emailVal)||!mobile||!subject||!MOBILE_RE.test(mobile))throw new Error('Please fill all fields with a valid mobile number.');
     if(password.length<8||!/[A-Z]/.test(password)||!/[a-z]/.test(password)||!/[0-9]/.test(password))throw new Error('Password must contain at least 8 characters with uppercase, lowercase and a number.');
     const users=Object.values(await allMap('users'));if(users.some(u=>cleanEmail(u.email)===emailVal))throw new Error('This email is already registered.');
@@ -710,7 +744,7 @@ async function route(req, res) {
     await set('users/'+uidVal,profile);return send(res,200,{message:'Registration submitted. Wait for Admin approval before logging in.',user:publicUser(profile)});
   }
   if(url.pathname==='/api/auth/login'&&method==='POST'){
-    const b=await body(req),email=cleanEmail(b.email),password=String(b.password||''); rateLimit(req,'login-email',8,900000,email);if(!EMAIL_RE.test(email)||!password)throw Object.assign(new Error('Invalid email or password.'),{status:401});
+    const b=await body(req),email=cleanEmail(b.email),password=String(b.password||''); await rateLimit(req,'login-email',8,900000,email);if(!EMAIL_RE.test(email)||!password)throw Object.assign(new Error('Invalid email or password.'),{status:401});
     const users=Object.values(await allMap('users')),user=users.find(u=>cleanEmail(u.email)===email);
     if(!user||!passwordMatches(password,user))throw Object.assign(new Error('Invalid email or password.'),{status:401});
     if(user.password&&!user.passwordHash){const upgraded={...user,passwordHash:hashPassword(password),updatedAt:nowIso()};delete upgraded.password;await set('users/'+user.uid,upgraded);Object.assign(user,upgraded);}
@@ -758,20 +792,36 @@ async function route(req, res) {
   }
 
   if(url.pathname==='/api/auth/forgot/request'&&method==='POST'){
-    const b=await body(req),email=cleanEmail(b.email); rateLimit(req,'forgot-email',4,1800000,email);if(!EMAIL_RE.test(email))throw new Error('Enter a valid email address.');
+    const b=await body(req),email=cleanEmail(b.email); await rateLimit(req,'forgot-email',4,1800000,email);if(!EMAIL_RE.test(email))throw new Error('Enter a valid email address.');
     const users=Object.values(await allMap('users')),user=users.find(u=>cleanEmail(u.email)===email);
     if(user){const otp=String(crypto.randomInt(100000,1000000));await set('passwordResets/'+user.uid,{hash:crypto.createHmac('sha256',AUTH_SESSION_SECRET).update(otp).digest('hex'),expiresAt:Date.now()+600000,attempts:0});const sent=await sendEmail(email,'Competitive Exam Master password reset',emailShell('Password reset','<p>Your password reset code is:</p><div style="font-size:32px;font-weight:800;letter-spacing:8px;padding:14px 0">'+otp+'</div><p>This code expires in 10 minutes.</p>'));if(!sent)throw Object.assign(new Error('Email delivery is unavailable right now.'),{status:503});}
     return send(res,200,{message:'If an account exists for that email, a reset code has been sent.'});
   }
   if(url.pathname==='/api/auth/forgot/confirm'&&method==='POST'){
-    const b=await body(req),email=cleanEmail(b.email); rateLimit(req,'forgot-confirm-email',8,1800000,email),otp=String(b.otp||''),newPassword=String(b.newPassword||''),users=Object.values(await allMap('users')),user=users.find(u=>cleanEmail(u.email)===email);
+    const b=await body(req);
+    const email=cleanEmail(b.email);
+    await rateLimit(req,'forgot-confirm-email',8,1800000,email);
+    const otp=String(b.otp||'').trim();
+    const newPassword=String(b.newPassword||'');
+    const users=Object.values(await allMap('users'));
+    const user=users.find(u=>cleanEmail(u.email)===email);
     if(!user)throw Object.assign(new Error('Invalid or expired reset request.'),{status:400});
     if(newPassword.length<8||!/[A-Z]/.test(newPassword)||!/[a-z]/.test(newPassword)||!/[0-9]/.test(newPassword))throw new Error('New password must contain at least 8 characters with uppercase, lowercase and a number.');
-    const reset=await get('passwordResets/'+user.uid),hash=crypto.createHmac('sha256',AUTH_SESSION_SECRET).update(otp).digest('hex'),stored=String(reset?.hash||'');
-    if(!reset||Date.now()>Number(reset.expiresAt)||Number(reset.attempts||0)>=5)throw Object.assign(new Error('Invalid or expired reset code.'),{status:400});
-    reset.attempts=Number(reset.attempts||0)+1;await set('passwordResets/'+user.uid,reset);
-    if(!/^\d{6}$/.test(otp)||stored.length!==hash.length||!crypto.timingSafeEqual(Buffer.from(hash),Buffer.from(stored)))throw Object.assign(new Error('Invalid or expired reset code.'),{status:400});
-    await set('users/'+user.uid,{...user,passwordHash:hashPassword(newPassword),updatedAt:nowIso()});await remove('passwordResets/'+user.uid);return send(res,200,{message:'Password reset successfully. You can now sign in.'});
+    const requestId=crypto.randomBytes(16).toString('hex');
+    const tx=await transact('passwordResets/'+user.uid,current=>{
+      if(!current||current.consumed===true||Date.now()>Number(current.expiresAt)||Number(current.attempts||0)>=5)return;
+      const stored=String(current.hash||'');
+      const candidate=crypto.createHmac('sha256',AUTH_SESSION_SECRET).update(otp).digest('hex');
+      const valid=/^\\d{6}$/.test(otp)&&stored.length===candidate.length&&crypto.timingSafeEqual(Buffer.from(candidate),Buffer.from(stored));
+      const attempts=Number(current.attempts||0)+1;
+      if(valid)return {...current,attempts,consumed:true,consumedAt:Date.now(),consumedBy:requestId};
+      return {...current,attempts};
+    });
+    const reset=tx.snapshot.val();
+    if(!tx.committed||reset?.consumedBy!==requestId)throw Object.assign(new Error('Invalid or expired reset code.'),{status:400});
+    await set('users/'+user.uid,{...user,passwordHash:hashPassword(newPassword),updatedAt:nowIso()});
+    await remove('passwordResets/'+user.uid);
+    return send(res,200,{message:'Password reset successfully. You can now sign in.'});
   }
 
   if (url.pathname==='/api/admin/users' && method==='GET') {
@@ -803,7 +853,7 @@ async function route(req, res) {
     if(!textValue) throw new Error('Notice cannot be empty.');
     if(textValue.length>1000) throw new Error('Notice must be 1000 characters or less.');
     const notice={id:uid('notice-'),audience,text:textValue,createdBy:user.email||user.name||'admin',createdAt:nowIso()};
-    const notices=await allMap('notices'); notices[notice.id]=notice; await set('notices',notices);
+    await set('notices/'+notice.id,notice);
     return send(res,200,{message:'Notice added successfully.',notice});
   }
 
@@ -813,7 +863,7 @@ async function route(req, res) {
     const notices=await allMap('notices'), id=decodeURIComponent(mNotice[1]);
     if(!notices[id]) throw new Error('Notice not found.');
     if(id==='notice-default') throw new Error('The default notice cannot be deleted.');
-    delete notices[id]; await set('notices',notices);
+    await remove('notices/'+id);
     return send(res,200,{message:'Notice deleted.'});
   }
 
@@ -877,8 +927,7 @@ async function route(req, res) {
     const mods=await allMap('modules');
     if(Object.values(mods).some(m=>m.name.toLowerCase()===name.toLowerCase())) throw new Error('That module already exists.');
     const mod={id:uid('m-'),name,icon:Array.from(String(b.icon||'📘').trim()).slice(0,2).join('')||'📘',description:String(b.description||'').trim().slice(0,80),createdBy:user.email||user.name,createdAt:nowIso()};
-    mods[mod.id]=mod;
-    await set('modules',mods);
+    await set('modules/'+mod.id,mod);
     return send(res,200,{message:'Module "'+name+'" added.',module:mod});
   }
 
@@ -889,10 +938,8 @@ async function route(req, res) {
     if(!mod) throw new Error('Module not found.');
     const tests=await allMap('tests'), affected=Object.values(tests).filter(t=>t.category===mod.name);
     if(affected.length&&user.role!=='admin') throw new Error('Module still has test series.');
-    for(const t of affected) delete tests[t.id];
-    delete mods[id];
-    await set('modules',mods);
-    await set('tests',tests);
+    for(const t of affected) await remove('tests/'+t.id);
+    await remove('modules/'+id);
     return send(res,200,{message:affected.length?'Module and its test series were deleted.':'Module deleted.'});
   }
 
@@ -925,8 +972,7 @@ async function route(req, res) {
     if(!t) throw new Error('Test series not found.');
     if(!ownsTest(user,t) && user.role!=='admin') throw Object.assign(new Error('You can only change attempt settings for your own test series.'),{status:403});
     t.attemptPolicy=(await body(req)).attemptPolicy==='once'?'once':'reattempt';
-    tests[t.id]=t;
-    await set('tests',tests);
+    await set('tests/'+t.id,t);
     return send(res,200,{message:t.attemptPolicy==='once'?'Students can attempt this test only once.':'Students can reattempt this test.',test:summarizeTest(t)});
   }
 
@@ -1023,7 +1069,7 @@ async function route(req, res) {
       if(actual!==target) throw new Error(section+': expected '+target+' questions but received '+actual+'.');
     }
     const t={id:uid('T'),title:String(b.title).trim(),exam:String(b.exam||'Competitive Exam').trim(),category:categoryName,subjects,sectionQuestionCounts,languages,type:String(b.type||'FREE').toUpperCase()==='PAID'?'paid':'free',price:0,duration:Number.parseInt(b.duration,10)||30,questions:qs,questionCount:qs.length,createdBy:user.email,createdById:user.uid,createdAt:nowIso(),published:true,attemptPolicy:b.attemptPolicy==='once'?'once':'reattempt'};
-    const tests=await allMap('tests'); tests[t.id]=t; await set('tests',tests);
+    await set('tests/'+t.id,t);
     return send(res,200,{message:'Test Series added successfully and published.',test:summarizeTest(t)});
   }
 
@@ -1033,8 +1079,7 @@ async function route(req, res) {
     const tests=await allMap('tests'), id=decodeURIComponent(mDeleteTest[1]), t=tests[id];
     if(!t) throw new Error('Test series not found.');
     if(!ownsTest(user,t) && user.role!=='admin') throw Object.assign(new Error('You can only delete your own test series.'),{status:403});
-    delete tests[id];
-    await set('tests',tests);
+    await remove('tests/'+id);
     return send(res,200,{message:'Test series deleted.'});
   }
 
@@ -1050,16 +1095,16 @@ async function route(req, res) {
     const b=await body(req), name=String(b.name||'').trim(), days=parseInt(b.days,10), price=parseFloat(b.price);
     if(!name||!Number.isFinite(days)||days<1||!Number.isFinite(price)||price<=0||Math.round(price*100)<1||Math.abs(Math.round(price*100)-price*100)>0.000001) throw new Error('Enter a valid plan with a price greater than ₹0 and at most two decimal places.');
     const p={id:uid('plan-'),name,days,price};
-    const plans=await allMap('plans'); plans[p.id]=p; await set('plans',plans);
+    await set('plans/'+p.id,p);
     return send(res,200,{message:'Plan added.',plans:Object.values(plans)});
   }
 
   const mPlan=url.pathname.match(/^\/api\/plans\/([^/]+)$/);
   if(mPlan&&method==='DELETE'){
     await requireRole(req,'admin');
+    const planId=decodeURIComponent(mPlan[1]);
+    await remove('plans/'+planId);
     const plans=await allMap('plans');
-    delete plans[decodeURIComponent(mPlan[1])];
-    await set('plans',plans);
     return send(res,200,{message:'Plan removed.',plans:Object.values(plans)});
   }
 
@@ -1086,8 +1131,7 @@ async function route(req, res) {
     if(Object.values(subs).some(s=>s.studentId===user.uid&&s.status==='pending')) throw new Error('You already have a payment waiting for verification.');
     if(Object.values(subs).some(s=>String(s.txnId).toLowerCase()===txn.toLowerCase())) throw new Error('This transaction ID has already been submitted.');
     const sub={id:uid('sub-'),studentId:user.uid,studentName:user.name,studentEmail:user.email,planId:p.id,planName:p.name,days:p.days,amount:p.price,txnId:txn,method:'UPI',status:'pending',requestedAt:nowIso(),decidedAt:null,startsAt:null,expiresAt:null};
-    subs[sub.id]=sub;
-    await set('subscriptions',subs);
+    await set('subscriptions/'+sub.id,sub);
     return send(res,200,{message:'Payment submitted. Premium starts after Admin verifies it.',subscription:sub});
   }
   if(url.pathname==='/api/subscription'&&method==='GET'){
@@ -1110,8 +1154,7 @@ async function route(req, res) {
       sub.expiresAt=new Date(start.getTime()+sub.days*86400000).toISOString();
     } else sub.status='rejected';
     sub.decidedAt=nowIso();
-    subs[sub.id]=sub;
-    await set('subscriptions',subs);
+    await set('subscriptions/'+sub.id,sub);
     await sendEmail(sub.studentEmail,'Premium subscription '+sub.status,emailShell('Premium subscription '+sub.status,'<p>Your '+escapeHtml(sub.planName)+' subscription request is <b>'+escapeHtml(sub.status)+'</b>.</p>'+ (sub.expiresAt?'<p>Valid until: <b>'+new Date(sub.expiresAt).toLocaleString()+'</b></p>':'')));
     return send(res,200,{message:'Payment '+sub.status+'.',subscription:sub});
   }
@@ -1140,7 +1183,7 @@ async function route(req, res) {
       delete sub.remainingMsAtPause;
       delete sub.pausedBy;
     }
-    subs[id]=sub; await set('subscriptions',subs);
+    await set('subscriptions/'+id,sub);
     return send(res,200,{message:action==='pause'?'Premium access paused.':'Premium access resumed.',subscription:sub});
   }
 
@@ -1163,8 +1206,7 @@ async function route(req, res) {
     const existing=Object.values(ps).find(p=>p.testId===t.id&&p.studentId===user.uid);
     if(existing) return send(res,200,{message:'You already have a '+existing.status+' request for this test.',purchase:existing});
     const p={id:uid('pur-'),testId:t.id,testTitle:t.title,price:t.price,studentId:user.uid,studentName:user.name,studentEmail:user.email,status:'pending',requestedAt:nowIso(),decidedAt:null};
-    ps[p.id]=p;
-    await set('purchases',ps);
+    await set('purchases/'+p.id,p);
     return send(res,200,{message:'Access request submitted. Waiting for Admin approval.',purchase:p});
   }
 
@@ -1175,8 +1217,7 @@ async function route(req, res) {
     if(!p) throw new Error('Request not found.');
     p.status=b.approved?'approved':'rejected';
     p.decidedAt=nowIso();
-    ps[p.id]=p;
-    await set('purchases',ps);
+    await set('purchases/'+p.id,p);
     await sendEmail(p.studentEmail,'Test access request '+p.status,emailShell('Test access '+p.status,'<p>Your access request for <b>'+escapeHtml(p.testTitle)+'</b> has been '+escapeHtml(p.status)+'.</p>'));
     return send(res,200,{message:'Request '+p.status+'.',purchase:p});
   }
