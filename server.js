@@ -676,7 +676,15 @@ async function route(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const method = req.method;
   if (method==='OPTIONS') return send(res,204,{});
-  if (process.env.SERVER_ROLE === 'exam' && !(url.pathname==='/api/health' || url.pathname==='/api/internal/auth/verify' || url.pathname==='/api/modules' || url.pathname.startsWith('/api/modules/') || url.pathname==='/api/tests' || url.pathname.startsWith('/api/tests/') || url.pathname==='/api/admin/ratings')) return send(res,404,{error:'This endpoint belongs to Server 1.'});
+  if(url.pathname==='/api/internal/modules'&&method==='DELETE'){
+    if(!process.env.INTERNAL_AUTH_SECRET||String(req.headers['x-internal-auth']||'')!==String(process.env.INTERNAL_AUTH_SECRET))return send(res,403,{error:'Forbidden.'});
+    const name=String(url.searchParams.get('name')||'').trim();
+    if(!name||name.length>200)return send(res,400,{error:'Invalid module name.'});
+    const tests=Object.values(await allMap('tests')).filter(t=>String(t.category||'').toLowerCase()===name.toLowerCase());
+    for(const test of tests)await remove('tests/'+test.id);
+    return send(res,200,{deleted:tests.length});
+  }
+  if (process.env.SERVER_ROLE === 'exam' && !(url.pathname==='/api/health' || url.pathname==='/api/tests' || url.pathname.startsWith('/api/tests/') || url.pathname==='/api/admin/ratings' || url.pathname==='/api/internal/modules')) return send(res,404,{error:'This endpoint belongs to Server 1.'});
   if (url.pathname.startsWith('/api/') && method!=='GET' && url.pathname!=='/api/webhook' && url.pathname!=='/api/internal/auth/verify') { await rateLimit(req,'api-global',180,60000); }
 
   if (url.pathname==='/api/config' && method==='GET') {
