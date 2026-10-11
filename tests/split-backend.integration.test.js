@@ -285,6 +285,15 @@ test('split backend registration, approval, Premium, image questions, timed subm
   const purchasedAccess = await call(base1, '/exam-api/api/tests/' + encodeURIComponent(exam.id), { cookie: buyer });
   requireStatus(purchasedAccess, 200, 'Server 2 recognizes approved Server 1 purchase');
 
+  const backup = await call(base1, '/api/admin/backup', { portal: 'admin', cookie: admin });
+  requireStatus(backup, 200, 'combined backup across both servers');
+  assert.ok(backup.data.tests && backup.data.tests[exam.id], 'combined backup must include Server 2 tests');
+  assert.ok(backup.data.submissions && Object.keys(backup.data.submissions).length > 0, 'combined backup must include Server 2 results');
+  const restore = await call(base1, '/api/admin/restore', { method: 'POST', portal: 'admin', cookie: admin, body: backup.data });
+  requireStatus(restore, 200, 'combined restore across both servers');
+  const afterRestore = await call(base1, '/exam-api/api/tests/' + encodeURIComponent(exam.id), { cookie: student });
+  requireStatus(afterRestore, 200, 'test remains accessible after combined restore');
+
   const deleteModule = await call(base1, '/api/modules/' + encodeURIComponent(moduleId), {
     method: 'DELETE', portal: 'admin', cookie: admin
   });
