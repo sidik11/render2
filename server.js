@@ -1152,6 +1152,9 @@ async function route(req, res) {
       if(imageDataUrl && (!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(imageDataUrl) || imageDataUrl.length>520000)) throw new Error('Question '+(i+1)+' image must be a compressed JPEG under 400 KB.');
       qs.push({question,options,answer,subject:String(q.subject||'General').trim()||'General',marks:Number.isFinite(Number(q.marks))?Number(q.marks):1,negative:Number.isFinite(Number(q.negative))?Number(q.negative):0,explanation:String(q.explanation||''),instructions:String(q.instructions||'').trim().slice(0,2000),imageDataUrl,translations});
     });
+    // Derive section metadata from the normalized question assignments, not from
+    // client-supplied metadata that can be missing or stale.
+    subjects=[...new Set(qs.map(q=>(String(q.subject||'General').trim()||'General')))];
     for(const [section,target] of Object.entries(sectionQuestionCounts)){
       const actual=qs.filter(q=>(q.subject||'General')===section).length;
       if(actual!==target) throw new Error(section+': expected '+target+' questions but received '+actual+'.');
