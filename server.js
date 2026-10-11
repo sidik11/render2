@@ -707,7 +707,7 @@ async function route(req, res) {
   }
   if(url.pathname==='/api/internal/backup'&&method==='GET'){
     if(!process.env.INTERNAL_AUTH_SECRET||String(req.headers['x-internal-auth']||'')!==String(process.env.INTERNAL_AUTH_SECRET))return send(res,403,{error:'Forbidden.'});
-    const backup={};for(const name of ['tests','submissions','ratings','attemptLocks','examAttempts','scoreIndex'])backup[name]=await get(name);
+    const backup={};for(const name of ['tests','submissions','ratings','attemptLocks','examAttempts','scoreIndex'])backup[name]=(await get(name))||{};
     return send(res,200,{backup});
   }
   if(url.pathname==='/api/internal/backup'&&method==='POST'){
