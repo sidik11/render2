@@ -11,6 +11,7 @@ const render1Root = path.resolve(__dirname, '..', '..', 'render1');
 const render2Root = path.resolve(__dirname, '..');
 const render1Entry = path.join(render1Root, 'server.js');
 const render2Entry = path.join(render2Root, 'server.js');
+let diagnosticLogs = () => '';
 
 async function freePort() {
   const server = net.createServer();
@@ -60,12 +61,17 @@ async function call(base, endpoint, { method = 'GET', body, cookie = '', portal 
   const headers = { Accept: 'application/json', 'X-CEM-Portal': portal };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (cookie) headers.Cookie = cookie;
-  const response = await fetch(base + endpoint, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(10000)
-  });
+  let response;
+  try {
+    response = await fetch(base + endpoint, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(10000)
+    });
+  } catch (error) {
+    throw new Error('Request failed: ' + method + ' ' + endpoint + ': ' + String(error.message || error) + '\\n' + diagnosticLogs());
+  }
   const data = await response.json().catch(() => ({}));
   return { status: response.status, data, headers: response.headers };
 }
@@ -116,6 +122,7 @@ test('split backend registration, approval, Premium, image questions, timed subm
   const server2 = startService(render2Entry, render2Root, {
     ...sharedEnv, PORT: String(port2), SERVER2_PORT: String(port2), SERVER1_URL: base1
   });
+  diagnosticLogs = () => 'Server1 logs: ' + server1.auditLogs() + ' Server2 logs: ' + server2.auditLogs();
   t.after(async () => {
     for (const child of [server2, server1]) {
       if (child.exitCode === null) child.kill('SIGTERM');
