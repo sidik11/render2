@@ -689,6 +689,13 @@ async function route(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const method = req.method;
   if (method==='OPTIONS') return send(res,204,{});
+  const internalTestMatch=url.pathname.match(/^\/api\/internal\/tests\/([^/]+)$/);
+  if(internalTestMatch&&method==='GET'){
+    if(!process.env.INTERNAL_AUTH_SECRET||String(req.headers['x-internal-auth']||'')!==String(process.env.INTERNAL_AUTH_SECRET))return send(res,403,{error:'Forbidden.'});
+    const testId=decodeURIComponent(internalTestMatch[1]),test=await get('tests/'+testId);
+    if(!test||!test.published)return send(res,404,{error:'Test not found.'});
+    return send(res,200,{test:{id:test.id,title:test.title,type:test.type,published:!!test.published,price:Number(test.price)||0}});
+  }
   if(url.pathname==='/api/internal/modules'&&method==='DELETE'){
     if(!process.env.INTERNAL_AUTH_SECRET||String(req.headers['x-internal-auth']||'')!==String(process.env.INTERNAL_AUTH_SECRET))return send(res,403,{error:'Forbidden.'});
     const name=String(url.searchParams.get('name')||'').trim();
@@ -697,7 +704,7 @@ async function route(req, res) {
     for(const test of tests)await remove('tests/'+test.id);
     return send(res,200,{deleted:tests.length});
   }
-  if (process.env.SERVER_ROLE === 'exam' && !(url.pathname==='/api/health' || url.pathname==='/api/tests' || url.pathname.startsWith('/api/tests/') || url.pathname==='/api/admin/ratings' || url.pathname==='/api/internal/modules')) return send(res,404,{error:'This endpoint belongs to Server 1.'});
+  if (process.env.SERVER_ROLE === 'exam' && !(url.pathname==='/api/health' || url.pathname==='/api/tests' || url.pathname.startsWith('/api/tests/') || url.pathname==='/api/admin/ratings' || url.pathname==='/api/internal/modules' || url.pathname.startsWith('/api/internal/tests/'))) return send(res,404,{error:'This endpoint belongs to Server 1.'});
   if (url.pathname.startsWith('/api/') && method!=='GET' && url.pathname!=='/api/webhook' && url.pathname!=='/api/internal/auth/verify') { await rateLimit(req,'api-global',180,60000); }
 
   if (url.pathname==='/api/config' && method==='GET') {
