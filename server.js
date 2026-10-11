@@ -185,6 +185,8 @@ async function update(pathName, value) {
   memUpdate(pathName, value);
 }
 
+const memoryTransactionQueues = new Map();
+
 async function transact(pathName, updater) {
   if (!useMemDb && db) {
     try { return await db.ref(pathName).transaction(updater, undefined, false); }
@@ -193,11 +195,22 @@ async function transact(pathName, updater) {
       throw Object.assign(new Error('Data storage is temporarily unavailable. Please try again.'), { status:503 });
     }
   }
-  const current = await get(pathName);
-  const next = updater(current);
-  if (next === undefined) return { committed:false, snapshot:{ val:()=>current } };
-  await set(pathName, next);
-  return { committed:true, snapshot:{ val:()=>next } };
+  const previous = memoryTransactionQueues.get(pathName) || Promise.resolve();
+  let release;
+  const currentTurn = new Promise(resolve => { release = resolve; });
+  const queued = previous.then(() => currentTurn);
+  memoryTransactionQueues.set(pathName, queued);
+  await previous;
+  try {
+    const current = await get(pathName);
+    const next = updater(current);
+    if (next === undefined) return { committed:false, snapshot:{ val:()=>current } };
+    await set(pathName, next);
+    return { committed:true, snapshot:{ val:()=>next } };
+  } finally {
+    release();
+    if (memoryTransactionQueues.get(pathName) === queued) memoryTransactionQueues.delete(pathName);
+  }
 }
 
 async function multiUpdate(values){
