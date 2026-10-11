@@ -217,7 +217,7 @@ test('split backend registration, approval, Premium, image questions, timed subm
   const student = userCookie(studentLogin);
 
   const beforePremium = await call(base1, '/exam-api/api/tests/' + encodeURIComponent(exam.id), { cookie: student });
-  assert.notEqual(beforePremium.status, 200, 'non-Premium student must not open a paid test');
+  assert.equal(beforePremium.status, 403, 'non-Premium student must receive a forbidden response');
   assert.match(String(beforePremium.data.error || ''), /Premium/i, 'expected Premium access denial');
 
   const subscriptionRequest = await call(base1, '/api/subscription/request', {
