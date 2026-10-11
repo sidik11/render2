@@ -45,7 +45,7 @@ async function pingServer1() {
 setInterval(pingServer1, KEEPALIVE_MS).unref();
 
 const CFG = {
-  port: Number(process.env.SERVER2_PORT || 3001),
+  port: Number(process.env.PORT || process.env.SERVER2_PORT || 3001),
   dbUrl: process.env.SERVER2_FIREBASE_DATABASE_URL || '',
   projectId: process.env.SERVER2_FIREBASE_PROJECT_ID || '',
   clientEmail: process.env.SERVER2_FIREBASE_CLIENT_EMAIL || '',
@@ -1001,11 +1001,25 @@ async function route(req, res) {
     const {user}=await currentUser(req),tests=await allMap('tests'),t=tests[decodeURIComponent(mTest[1])];if(!t)throw new Error('Test not found.');
     if(await paidAccessBlocked(t,user))throw new Error('This is a Premium test series. Subscribe to Premium to access all paid test series.');
     const b=await body(req),attemptId=String(b.attemptId||'').trim();if(!/^[A-Za-z0-9_-]{24,100}$/.test(attemptId))throw Object.assign(new Error('This exam session is invalid or expired. Please reopen the test.'),{status:400});
-    const examAttempt=await get('examAttempts/'+attemptId);
+    let examAttempt=await get('examAttempts/'+attemptId);
     if(!examAttempt||examAttempt.testId!==t.id||examAttempt.userId!==user.uid)throw Object.assign(new Error('This exam session is invalid or expired. Please reopen the test.'),{status:409});
     const submissionId='att-'+crypto.createHash('sha256').update(user.uid+'|'+t.id+'|'+attemptId).digest('hex').slice(0,40);
     const existingSubmission=await get('submissions/'+submissionId);
-    if(existingSubmission)return send(res,200,await calculateResult(t,existingSubmission.answers||{},existingSubmission.timeBySubject||{},false,user,false,submissionId));
+    if(existingSubmission){
+      await update('examAttempts/'+attemptId,{status:'submitted',submissionId,submittedAt:existingSubmission.submittedAt||nowIso()});
+      return send(res,200,await calculateResult(t,existingSubmission.answers||{},existingSubmission.timeBySubject||{},false,user,false,submissionId));
+    }
+    if(examAttempt.status==='submitting' && Date.now()-new Date(examAttempt.submitClaimedAt||0).getTime()>120000){
+      const recovered=await transact('examAttempts/'+attemptId,current=>{
+        if(!current||current.status!=='submitting'||current.submissionId!==examAttempt.submissionId||Date.now()-new Date(current.submitClaimedAt||0).getTime()<=120000)return;
+        const restored={...current,status:'active'};delete restored.submissionId;delete restored.submitClaimedAt;return restored;
+      });
+      if(recovered.committed && t.attemptPolicy==='once' && user.role==='student'){
+        const staleLockPath='attemptLocks/'+encodeURIComponent(t.id)+'/'+encodeURIComponent(user.uid),staleLock=await get(staleLockPath);
+        if(staleLock&&staleLock.submissionId===examAttempt.submissionId)await remove(staleLockPath);
+      }
+      examAttempt=await get('examAttempts/'+attemptId);
+    }
     if(examAttempt.status!=='active')throw Object.assign(new Error('This exam session is already being submitted or has expired. Please reopen the test.'),{status:409});
     const now=Date.now(),expiresAt=new Date(examAttempt.expiresAt).getTime();if(!Number.isFinite(expiresAt)||now>expiresAt+15000)throw Object.assign(new Error('Exam time has expired. Your attempt can no longer be submitted.'),{status:409});
     const rawAnswers=b.answers&&typeof b.answers==='object'&&!Array.isArray(b.answers)?b.answers:{};const answers={};for(let i=0;i<t.questions.length;i++){const v=String(rawAnswers[i]??'').trim().toUpperCase();if(v&&/^[ABCD]$/.test(v))answers[i]=v;}
