@@ -1142,7 +1142,7 @@ async function route(req, res) {
     return send(res,200,{subscriptions:subs});
   }
 
-  const mSub=url.pathname.match(/^\\/api\\/subscription\\/([^/]+)\\/decide$/);
+  const mSub=url.pathname.match(/^\/api\/subscription\/([^/]+)\/decide$/);
   if(mSub&&method==='POST'){
     await requireRole(req,'admin');
     const b=await body(req),id=decodeURIComponent(mSub[1]),approved=!!b.approved;
