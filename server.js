@@ -1028,14 +1028,14 @@ async function route(req, res) {
   if(mTest && method==='GET' && !mTest[2]) {
     const {user}=await currentUser(req), tests=await allMap('tests'), t=tests[decodeURIComponent(mTest[1])];
     if(!t||!t.published) throw new Error('Test not found.');
-    if(await paidAccessBlocked(t,user)) throw new Error('This is a Premium test series. Subscribe to Premium to access all paid test series.');
-    if(await attemptBlocked(t,user)) throw new Error('You have already attempted this test. Only one attempt is allowed for this test series.');
+    if(await paidAccessBlocked(t,user)) throw Object.assign(new Error('This is a Premium test series. Subscribe to Premium to access all paid test series.'),{status:403});
+    if(await attemptBlocked(t,user)) throw Object.assign(new Error('You have already attempted this test. Only one attempt is allowed for this test series.'),{status:409});
     return send(res,200,summarizeTest(t));
   }
   if(mTest && method==='POST' && mTest[2]==='start') {
     const {user}=await currentUser(req), tests=await allMap('tests'), t=tests[decodeURIComponent(mTest[1])];
     if(!t||!t.published) throw new Error('Test not found.');
-    if(await paidAccessBlocked(t,user)) throw new Error('This is a Premium test series. Subscribe to Premium to access all paid test series.');
+    if(await paidAccessBlocked(t,user)) throw Object.assign(new Error('This is a Premium test series. Subscribe to Premium to access all paid test series.'),{status:403});
     if(await attemptBlocked(t,user)) throw Object.assign(new Error('You have already attempted this test. Only one attempt is allowed for this test series.'),{status:409});
     const attemptId=crypto.randomBytes(24).toString('base64url'), startedAt=Date.now(), durationMs=Math.max(60000,Math.min(Number(t.duration)||30,1440)*60000);
     const attempt={id:attemptId,testId:t.id,userId:user.uid,startedAt:new Date(startedAt).toISOString(),expiresAt:new Date(startedAt+durationMs).toISOString(),status:'active',questionCount:t.questions.length};
@@ -1044,7 +1044,8 @@ async function route(req, res) {
   }
   if(mTest && method==='GET' && mTest[2]==='solution'){
     const {user}=await currentUser(req), tests=await allMap('tests'), t=tests[decodeURIComponent(mTest[1])];
-    if(!t) throw new Error('Test not found.');
+    if(!t||!t.published) throw Object.assign(new Error('Test not found.'),{status:404});
+    if(await paidAccessBlocked(t,user)) throw Object.assign(new Error('This is a Premium test series. Subscribe to Premium to access all paid test series.'),{status:403});
     const submissions=Object.values(await allMap('submissions'))
       .filter(s=>s&&s.testId===t.id&&s.userId===user.uid)
       .sort((a,b)=>new Date(a.submittedAt||0)-new Date(b.submittedAt||0));
@@ -1056,7 +1057,7 @@ async function route(req, res) {
   }
   if(mTest&&method==='POST'&&mTest[2]==='submit'){
     const {user}=await currentUser(req),tests=await allMap('tests'),t=tests[decodeURIComponent(mTest[1])];if(!t)throw new Error('Test not found.');
-    if(await paidAccessBlocked(t,user))throw new Error('This is a Premium test series. Subscribe to Premium to access all paid test series.');
+    if(await paidAccessBlocked(t,user))throw Object.assign(new Error('This is a Premium test series. Subscribe to Premium to access all paid test series.'),{status:403});
     const b=await body(req),attemptId=String(b.attemptId||'').trim();if(!/^[A-Za-z0-9_-]{24,100}$/.test(attemptId))throw Object.assign(new Error('This exam session is invalid or expired. Please reopen the test.'),{status:400});
     let examAttempt=await get('examAttempts/'+attemptId);
     if(!examAttempt||examAttempt.testId!==t.id||examAttempt.userId!==user.uid)throw Object.assign(new Error('This exam session is invalid or expired. Please reopen the test.'),{status:409});
