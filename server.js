@@ -704,7 +704,20 @@ async function route(req, res) {
     for(const test of tests)await remove('tests/'+test.id);
     return send(res,200,{deleted:tests.length});
   }
-  if (process.env.SERVER_ROLE === 'exam' && !(url.pathname==='/api/health' || url.pathname==='/api/tests' || url.pathname.startsWith('/api/tests/') || url.pathname==='/api/admin/ratings' || url.pathname==='/api/internal/modules' || url.pathname.startsWith('/api/internal/tests/'))) return send(res,404,{error:'This endpoint belongs to Server 1.'});
+  if(url.pathname==='/api/internal/backup'&&method==='GET'){
+    if(!process.env.INTERNAL_AUTH_SECRET||String(req.headers['x-internal-auth']||'')!==String(process.env.INTERNAL_AUTH_SECRET))return send(res,403,{error:'Forbidden.'});
+    const backup={};for(const name of ['tests','submissions','ratings','attemptLocks','examAttempts','scoreIndex'])backup[name]=await get(name);
+    return send(res,200,{backup});
+  }
+  if(url.pathname==='/api/internal/backup'&&method==='POST'){
+    if(!process.env.INTERNAL_AUTH_SECRET||String(req.headers['x-internal-auth']||'')!==String(process.env.INTERNAL_AUTH_SECRET))return send(res,403,{error:'Forbidden.'});
+    const b=await body(req);
+    if(!b||typeof b!=='object'||!b.tests||typeof b.tests!=='object'||Array.isArray(b.tests))return send(res,400,{error:'Backup is missing exam test records.'});
+    const values={};for(const name of ['tests','submissions','ratings','attemptLocks','examAttempts','scoreIndex'])if(b[name]!==undefined)values[name]=b[name];
+    await multiUpdate(values);
+    return send(res,200,{message:'Exam data restored.'});
+  }
+  if (process.env.SERVER_ROLE === 'exam' && !(url.pathname==='/api/health' || url.pathname==='/api/tests' || url.pathname.startsWith('/api/tests/') || url.pathname==='/api/admin/ratings' || url.pathname==='/api/internal/modules' || url.pathname==='/api/internal/backup' || url.pathname.startsWith('/api/internal/tests/'))) return send(res,404,{error:'This endpoint belongs to Server 1.'});
   if (url.pathname.startsWith('/api/') && method!=='GET' && url.pathname!=='/api/webhook' && url.pathname!=='/api/internal/auth/verify') { await rateLimit(req,'api-global',180,60000); }
 
   if (url.pathname==='/api/config' && method==='GET') {
