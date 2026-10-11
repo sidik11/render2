@@ -1035,7 +1035,7 @@ async function route(req, res) {
     });
     if(!claim.committed){
       const saved=await get('submissions/'+submissionId);
-      if(saved)return send(res,200,await calculateResult(t,saved.answers||{},saved.timeBySubject||{},false,user,false,submissionId));
+      if(saved){await update('examAttempts/'+attemptId,{status:'submitted',submissionId,submittedAt:saved.submittedAt||nowIso()});return send(res,200,await calculateResult(t,saved.answers||{},saved.timeBySubject||{},false,user,false,submissionId));}
       throw Object.assign(new Error('This exam attempt is already being submitted. Please wait a moment and retry.'),{status:409});
     }
     try{
