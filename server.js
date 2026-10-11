@@ -807,7 +807,7 @@ async function route(req, res) {
       if(!current||current.consumed===true||Date.now()>Number(current.expiresAt)||Number(current.attempts||0)>=5)return;
       const stored=String(current.hash||'');
       const candidate=crypto.createHmac('sha256',AUTH_SESSION_SECRET).update(otp).digest('hex');
-      const valid=/^\\d{6}$/.test(otp)&&stored.length===candidate.length&&crypto.timingSafeEqual(Buffer.from(candidate),Buffer.from(stored));
+      const valid=/^\d{6}$/.test(otp)&&stored.length===candidate.length&&crypto.timingSafeEqual(Buffer.from(candidate),Buffer.from(stored));
       const attempts=Number(current.attempts||0)+1;
       if(valid)return {...current,attempts,consumed:true,consumedAt:Date.now(),consumedBy:requestId};
       return {...current,attempts};
