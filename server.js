@@ -684,7 +684,7 @@ async function route(req, res) {
       'Competitive Exam Master Admin OTP',
       emailShell('Admin login verification','<p>Your one-time Admin login OTP is:</p><div style="font-size:32px;font-weight:800;letter-spacing:8px;padding:14px 0">'+otp+'</div><p>This OTP expires in 10 minutes. If you did not request this, ignore this email.</p>')
     );
-    if (!sent) {
+    if (!sent || sent.ok !== true) {
       adminOtpState.hash='';
       adminOtpState.expiresAt=0;
       adminOtpState.attempts=0;
@@ -785,7 +785,7 @@ async function route(req, res) {
   if(url.pathname==='/api/auth/forgot/request'&&method==='POST'){
     const b=await body(req),email=cleanEmail(b.email); await rateLimit(req,'forgot-email',4,1800000,email);if(!EMAIL_RE.test(email))throw new Error('Enter a valid email address.');
     const users=Object.values(await allMap('users')),user=users.find(u=>cleanEmail(u.email)===email);
-    if(user){const otp=String(crypto.randomInt(100000,1000000));await set('passwordResets/'+user.uid,{hash:crypto.createHmac('sha256',AUTH_SESSION_SECRET).update(otp).digest('hex'),expiresAt:Date.now()+600000,attempts:0});const sent=await sendEmail(email,'Competitive Exam Master password reset',emailShell('Password reset','<p>Your password reset code is:</p><div style="font-size:32px;font-weight:800;letter-spacing:8px;padding:14px 0">'+otp+'</div><p>This code expires in 10 minutes.</p>'));if(!sent)throw Object.assign(new Error('Email delivery is unavailable right now.'),{status:503});}
+    if(user){const otp=String(crypto.randomInt(100000,1000000));await set('passwordResets/'+user.uid,{hash:crypto.createHmac('sha256',AUTH_SESSION_SECRET).update(otp).digest('hex'),expiresAt:Date.now()+600000,attempts:0});const sent=await sendEmail(email,'Competitive Exam Master password reset',emailShell('Password reset','<p>Your password reset code is:</p><div style="font-size:32px;font-weight:800;letter-spacing:8px;padding:14px 0">'+otp+'</div><p>This code expires in 10 minutes.</p>'));if(!sent || sent.ok !== true){await remove('passwordResets/'+user.uid);throw Object.assign(new Error('Email delivery is unavailable right now.'),{status:503});}}
     return send(res,200,{message:'If an account exists for that email, a reset code has been sent.'});
   }
   if(url.pathname==='/api/auth/forgot/confirm'&&method==='POST'){
@@ -1026,7 +1026,7 @@ async function route(req, res) {
     const rawTimes=b.timeBySubject&&typeof b.timeBySubject==='object'&&!Array.isArray(b.timeBySubject)?b.timeBySubject:{};const timeBySubject={};for(const subj of (t.subjects||['General'])){const key=encodeFirebaseKey(subj),v=Number(rawTimes[subj]??rawTimes[key]);if(Number.isFinite(v)&&v>=0)timeBySubject[key]=Math.min(v,(Number(t.duration)||30)*60);}
     if(t.attemptPolicy==='once'&&user.role==='student'){
       const lockPath='attemptLocks/'+encodeURIComponent(t.id)+'/'+encodeURIComponent(user.uid);
-      if(db&&!useMemDb){const tx=await db.ref(lockPath).transaction(cur=>cur===null?{attemptId,submissionId,createdAt:nowIso()}:undefined,undefined,false);if(!tx.committed){const lock=tx.snapshot.val();if(lock?.submissionId===submissionId){const saved=await get('submissions/'+submissionId);if(saved)return send(res,200,await calculateResult(t,saved.answers||{},saved.timeBySubject||{},false,user,false,submissionId));}throw Object.assign(new Error('You have already attempted this test. Only one attempt is allowed for this test series.'),{status:409});}}
+      if(db&&!useMemDb){const tx=await db.ref(lockPath).transaction(cur=>cur===null?{attemptId,submissionId,createdAt:nowIso()}:undefined,undefined,false);if(!tx.committed){const lock=tx.snapshot.val();if(lock?.submissionId===submissionId){const saved=await get('submissions/'+submissionId);if(saved){await update('examAttempts/'+attemptId,{status:'submitted',submissionId,submittedAt:saved.submittedAt||nowIso()});return send(res,200,await calculateResult(t,saved.answers||{},saved.timeBySubject||{},false,user,false,submissionId));}}throw Object.assign(new Error('You have already attempted this test. Only one attempt is allowed for this test series.'),{status:409});}}
       else {const lock=await get(lockPath);if(lock){const saved=await get('submissions/'+submissionId);if(saved)return send(res,200,await calculateResult(t,saved.answers||{},saved.timeBySubject||{},false,user,false,submissionId));throw Object.assign(new Error('You have already attempted this test. Only one attempt is allowed for this test series.'),{status:409});}await set(lockPath,{attemptId,submissionId,createdAt:nowIso()});}
     }
     const claim=await transact('examAttempts/'+attemptId,current=>{
