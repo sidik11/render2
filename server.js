@@ -665,7 +665,7 @@ async function route(req, res) {
   const method = req.method;
   if (method==='OPTIONS') return send(res,204,{});
   if (process.env.SERVER_ROLE === 'exam' && !(url.pathname==='/api/health' || url.pathname==='/api/internal/auth/verify' || url.pathname==='/api/modules' || url.pathname.startsWith('/api/modules/') || url.pathname==='/api/tests' || url.pathname.startsWith('/api/tests/') || url.pathname==='/api/admin/ratings')) return send(res,404,{error:'This endpoint belongs to Server 1.'});
-  if (url.pathname.startsWith('/api/') && method!=='GET' && url.pathname!=='/api/webhook' && url.pathname!=='/api/internal/auth/verify') { await await rateLimit(req,'api-global',180,60000); }
+  if (url.pathname.startsWith('/api/') && method!=='GET' && url.pathname!=='/api/webhook' && url.pathname!=='/api/internal/auth/verify') { await rateLimit(req,'api-global',180,60000); }
 
   if (url.pathname==='/api/config' && method==='GET') {
     return send(res,200,{paymentEnabled:CFG.payment.enabled,paymentMode:CFG.payment.enabled?'test':null,authMode:'manual'});
@@ -675,7 +675,7 @@ async function route(req, res) {
   }
 
   if (url.pathname==='/api/admin/request-otp' && method==='POST') {
-    const b=await body(req), email=cleanEmail(b.email); await await rateLimit(req,'admin-otp',5,900000,email);
+    const b=await body(req), email=cleanEmail(b.email); await rateLimit(req,'admin-otp',5,900000,email);
     if(email!==CFG.admin.email) throw Object.assign(new Error('This email is not authorized for Admin access.'),{status:403});
     if(Date.now()-adminOtpState.sentAt < 60*1000) throw Object.assign(new Error('Please wait 60 seconds before requesting another OTP.'),{status:429});
     const otp=String(crypto.randomInt(100000,1000000));
@@ -699,7 +699,7 @@ async function route(req, res) {
   }
 
   if (url.pathname==='/api/admin/verify-otp' && method==='POST') {
-    const b=await body(req), email=cleanEmail(b.email), otp=String(b.otp||'').trim(); await await rateLimit(req,'admin-otp-verify',10,900000,email);
+    const b=await body(req), email=cleanEmail(b.email), otp=String(b.otp||'').trim(); await rateLimit(req,'admin-otp-verify',10,900000,email);
     if(email!==CFG.admin.email) throw Object.assign(new Error('This email is not authorized for Admin access.'),{status:403});
     if(!/^\d{6}$/.test(otp) || !adminOtpState.hash || Date.now()>adminOtpState.expiresAt) throw Object.assign(new Error('OTP is invalid or expired. Request a new OTP.'),{status:401});
     adminOtpState.attempts++;
@@ -723,7 +723,7 @@ async function route(req, res) {
   }
 
   if(url.pathname==='/api/auth/register/student'&&method==='POST'){
-    const b=await body(req),uidVal=uid('std-'),emailVal=cleanEmail(b.email); await await rateLimit(req,'register-email',6,3600000,emailVal),name=String(b.name||'').trim(),mobile=String(b.mobile||'').trim(),password=String(b.password||'');
+    const b=await body(req),uidVal=uid('std-'),emailVal=cleanEmail(b.email),name=String(b.name||'').trim(),mobile=String(b.mobile||'').trim(),password=String(b.password||''); await rateLimit(req,'register-email',6,3600000,emailVal);
     if(!name||!EMAIL_RE.test(emailVal)||!mobile||!MOBILE_RE.test(mobile))throw new Error('Please provide a valid name, email and mobile number.');
     if(password.length<8||!/[A-Z]/.test(password)||!/[a-z]/.test(password)||!/[0-9]/.test(password))throw new Error('Password must contain at least 8 characters with uppercase, lowercase and a number.');
     const users=Object.values(await allMap('users'));if(users.some(u=>cleanEmail(u.email)===emailVal))throw new Error('This email is already registered.');
@@ -731,7 +731,7 @@ async function route(req, res) {
     await set('users/'+uidVal,profile);return send(res,200,{message:'Student account created. Please sign in to continue.',user:publicUser(profile)});
   }
   if(url.pathname==='/api/auth/register/teacher'&&method==='POST'){
-    const b=await body(req),uidVal=uid('tch-'),emailVal=cleanEmail(b.email); await await rateLimit(req,'register-email',6,3600000,emailVal),name=String(b.name||'').trim(),mobile=String(b.mobile||'').trim(),subject=String(b.subject||'').trim(),password=String(b.password||'');
+    const b=await body(req),uidVal=uid('tch-'),emailVal=cleanEmail(b.email),name=String(b.name||'').trim(),mobile=String(b.mobile||'').trim(),subject=String(b.subject||'').trim(),password=String(b.password||''); await rateLimit(req,'register-email',6,3600000,emailVal);
     if(!name||!EMAIL_RE.test(emailVal)||!mobile||!subject||!MOBILE_RE.test(mobile))throw new Error('Please fill all fields with a valid mobile number.');
     if(password.length<8||!/[A-Z]/.test(password)||!/[a-z]/.test(password)||!/[0-9]/.test(password))throw new Error('Password must contain at least 8 characters with uppercase, lowercase and a number.');
     const users=Object.values(await allMap('users'));if(users.some(u=>cleanEmail(u.email)===emailVal))throw new Error('This email is already registered.');
@@ -739,7 +739,7 @@ async function route(req, res) {
     await set('users/'+uidVal,profile);return send(res,200,{message:'Registration submitted. Wait for Admin approval before logging in.',user:publicUser(profile)});
   }
   if(url.pathname==='/api/auth/login'&&method==='POST'){
-    const b=await body(req),email=cleanEmail(b.email),password=String(b.password||''); await await rateLimit(req,'login-email',8,900000,email);if(!EMAIL_RE.test(email)||!password)throw Object.assign(new Error('Invalid email or password.'),{status:401});
+    const b=await body(req),email=cleanEmail(b.email),password=String(b.password||''); await rateLimit(req,'login-email',8,900000,email);if(!EMAIL_RE.test(email)||!password)throw Object.assign(new Error('Invalid email or password.'),{status:401});
     const users=Object.values(await allMap('users')),user=users.find(u=>cleanEmail(u.email)===email);
     if(!user||!passwordMatches(password,user))throw Object.assign(new Error('Invalid email or password.'),{status:401});
     if(user.password&&!user.passwordHash){const upgraded={...user,passwordHash:hashPassword(password),updatedAt:nowIso()};delete upgraded.password;await set('users/'+user.uid,upgraded);Object.assign(user,upgraded);}
@@ -787,7 +787,7 @@ async function route(req, res) {
   }
 
   if(url.pathname==='/api/auth/forgot/request'&&method==='POST'){
-    const b=await body(req),email=cleanEmail(b.email); await await rateLimit(req,'forgot-email',4,1800000,email);if(!EMAIL_RE.test(email))throw new Error('Enter a valid email address.');
+    const b=await body(req),email=cleanEmail(b.email); await rateLimit(req,'forgot-email',4,1800000,email);if(!EMAIL_RE.test(email))throw new Error('Enter a valid email address.');
     const users=Object.values(await allMap('users')),user=users.find(u=>cleanEmail(u.email)===email);
     if(user){const otp=String(crypto.randomInt(100000,1000000));await set('passwordResets/'+user.uid,{hash:crypto.createHmac('sha256',AUTH_SESSION_SECRET).update(otp).digest('hex'),expiresAt:Date.now()+600000,attempts:0});const sent=await sendEmail(email,'Competitive Exam Master password reset',emailShell('Password reset','<p>Your password reset code is:</p><div style="font-size:32px;font-weight:800;letter-spacing:8px;padding:14px 0">'+otp+'</div><p>This code expires in 10 minutes.</p>'));if(!sent)throw Object.assign(new Error('Email delivery is unavailable right now.'),{status:503});}
     return send(res,200,{message:'If an account exists for that email, a reset code has been sent.'});
@@ -795,7 +795,7 @@ async function route(req, res) {
   if(url.pathname==='/api/auth/forgot/confirm'&&method==='POST'){
     const b=await body(req);
     const email=cleanEmail(b.email);
-    await await rateLimit(req,'forgot-confirm-email',8,1800000,email);
+    await rateLimit(req,'forgot-confirm-email',8,1800000,email);
     const otp=String(b.otp||'').trim();
     const newPassword=String(b.newPassword||'');
     const users=Object.values(await allMap('users'));
