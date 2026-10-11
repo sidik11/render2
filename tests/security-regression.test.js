@@ -44,6 +44,8 @@ if (path.basename(path.dirname(serverPath)) === 'render2') {
     assert.ok(source.includes("const claim=await transact('examAttempts/'+attemptId,current=>"));
     assert.ok(source.includes("status:'submitting',submissionId,submitClaimedAt:nowIso()"));
     assert.ok(source.includes("await update('examAttempts/'+attemptId,{status:'submitted',submissionId,submittedAt:existingSubmission.submittedAt||nowIso()});"));
+    assert.ok(source.includes('async function server1ApprovedPurchase(studentId,testId)'));
+    assert.ok(source.includes('/api/internal/purchase/approved?studentId='));
   });
 } else {
   test('internal verification endpoints reject missing shared secrets', () => {
