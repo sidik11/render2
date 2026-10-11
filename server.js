@@ -1122,11 +1122,18 @@ async function route(req, res) {
     if(!p) throw new Error('Please choose a plan.');
     const txn=String(b.txnId||'').trim();
     if(txn.length<6) throw new Error('Enter the transaction / UTR ID.');
-    const subs=await allMap('subscriptions');
-    if(Object.values(subs).some(s=>s.studentId===user.uid&&s.status==='pending')) throw new Error('You already have a payment waiting for verification.');
-    if(Object.values(subs).some(s=>String(s.txnId).toLowerCase()===txn.toLowerCase())) throw new Error('This transaction ID has already been submitted.');
     const sub={id:uid('sub-'),studentId:user.uid,studentName:user.name,studentEmail:user.email,planId:p.id,planName:p.name,days:p.days,amount:p.price,txnId:txn,method:'UPI',status:'pending',requestedAt:nowIso(),decidedAt:null,startsAt:null,expiresAt:null};
-    await set('subscriptions/'+sub.id,sub);
+    const requestTx=await transact('subscriptions',current=>{
+      const subs=current&&typeof current==='object'?current:{};
+      if(Object.values(subs).some(item=>item.studentId===user.uid&&item.status==='pending'))return;
+      if(Object.values(subs).some(item=>String(item.txnId||'').toLowerCase()===txn.toLowerCase()))return;
+      return {...subs,[sub.id]:sub};
+    });
+    if(!requestTx.committed){
+      const current=requestTx.snapshot.val()||{};
+      if(Object.values(current).some(item=>item.studentId===user.uid&&item.status==='pending'))throw new Error('You already have a payment waiting for verification.');
+      throw new Error('This transaction ID has already been submitted.');
+    }
     return send(res,200,{message:'Payment submitted. Premium starts after Admin verifies it.',subscription:sub});
   }
   if(url.pathname==='/api/subscription'&&method==='GET'){
@@ -1135,21 +1142,31 @@ async function route(req, res) {
     return send(res,200,{subscriptions:subs});
   }
 
-  const mSub=url.pathname.match(/^\/api\/subscription\/([^/]+)\/decide$/);
+  const mSub=url.pathname.match(/^\\/api\\/subscription\\/([^/]+)\\/decide$/);
   if(mSub&&method==='POST'){
     await requireRole(req,'admin');
-    const b=await body(req), subs=await allMap('subscriptions'), sub=subs[decodeURIComponent(mSub[1])];
-    if(!sub) throw new Error('Request not found.');
-    if(sub.status!=='pending') throw new Error('This request was already '+sub.status+'.');
-    if(b.approved){
-      const act=await activeSubscription(sub.studentId);
-      const start=act?new Date(act.expiresAt):new Date();
-      sub.status='approved';
-      sub.startsAt=start.toISOString();
-      sub.expiresAt=new Date(start.getTime()+sub.days*86400000).toISOString();
-    } else sub.status='rejected';
-    sub.decidedAt=nowIso();
-    await set('subscriptions/'+sub.id,sub);
+    const b=await body(req),id=decodeURIComponent(mSub[1]),approved=!!b.approved;
+    const requestTx=await transact('subscriptions',current=>{
+      const subs=current&&typeof current==='object'?current:{};
+      const existing=subs[id];
+      if(!existing||existing.status!=='pending')return;
+      const sub={...existing};
+      if(approved){
+        const active=Object.values(subs).filter(item=>item.id!==id&&String(item.studentId)===String(sub.studentId)&&item.status==='approved'&&Number.isFinite(Date.parse(item.expiresAt))&&Date.parse(item.expiresAt)>Date.now()).sort((a,b)=>Date.parse(b.expiresAt)-Date.parse(a.expiresAt))[0];
+        const start=active?new Date(active.expiresAt):new Date();
+        sub.status='approved';
+        sub.startsAt=start.toISOString();
+        sub.expiresAt=new Date(start.getTime()+Number(sub.days)*86400000).toISOString();
+      }else sub.status='rejected';
+      sub.decidedAt=nowIso();
+      return {...subs,[id]:sub};
+    });
+    if(!requestTx.committed){
+      const current=requestTx.snapshot.val()||{},existing=current[id];
+      if(!existing)throw new Error('Request not found.');
+      throw new Error('This request was already '+existing.status+'.');
+    }
+    const sub=requestTx.snapshot.val()[id];
     await sendEmail(sub.studentEmail,'Premium subscription '+sub.status,emailShell('Premium subscription '+sub.status,'<p>Your '+escapeHtml(sub.planName)+' subscription request is <b>'+escapeHtml(sub.status)+'</b>.</p>'+ (sub.expiresAt?'<p>Valid until: <b>'+new Date(sub.expiresAt).toLocaleString()+'</b></p>':'')));
     return send(res,200,{message:'Payment '+sub.status+'.',subscription:sub});
   }
@@ -1197,11 +1214,16 @@ async function route(req, res) {
     const {user}=await requireRole(req,'student'), b=await body(req), tests=await allMap('tests'), t=tests[b.testId];
     if(!t||!t.published) throw new Error('Test not found.');
     if(t.type!=='paid') throw new Error('That test is free.');
-    const ps=await allMap('purchases');
-    const existing=Object.values(ps).find(p=>p.testId===t.id&&p.studentId===user.uid);
-    if(existing) return send(res,200,{message:'You already have a '+existing.status+' request for this test.',purchase:existing});
     const p={id:uid('pur-'),testId:t.id,testTitle:t.title,price:t.price,studentId:user.uid,studentName:user.name,studentEmail:user.email,status:'pending',requestedAt:nowIso(),decidedAt:null};
-    await set('purchases/'+p.id,p);
+    const purchaseTx=await transact('purchases',current=>{
+      const purchases=current&&typeof current==='object'?current:{};
+      if(Object.values(purchases).some(item=>item.testId===t.id&&item.studentId===user.uid))return;
+      return {...purchases,[p.id]:p};
+    });
+    if(!purchaseTx.committed){
+      const existing=Object.values(purchaseTx.snapshot.val()||{}).find(item=>item.testId===t.id&&item.studentId===user.uid);
+      return send(res,200,{message:'You already have a '+existing.status+' request for this test.',purchase:existing});
+    }
     return send(res,200,{message:'Access request submitted. Waiting for Admin approval.',purchase:p});
   }
 
