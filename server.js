@@ -423,48 +423,35 @@ async function authoritativeModules() {
 }
 
 async function currentUser(req,roles){
-  // Server 2 verifies the signed session locally. Both servers MUST use the
-  // same AUTH_SESSION_SECRET. This removes the fragile Server2 -> Server1
-  // authentication round-trip from the exam request path.
   const portal=String(req.headers['x-cem-portal']||'student').toLowerCase();
   const token=getSessionToken(req,portal);
-  if(!token) throw Object.assign(new Error('Please log in.'),{status:401});
-
-  const adminSession=verifyAdminSession(token);
-  const userSession=verifyUserSession(token);
-  if(!adminSession&&!userSession) {
-    throw Object.assign(new Error('Your session is invalid or expired. Please log in again.'),{status:401});
-  }
-
+  if(!token)throw Object.assign(new Error('Please log in.'),{status:401});
+  const adminSession=verifyAdminSession(token),userSession=verifyUserSession(token);
+  if(!adminSession&&!userSession)throw Object.assign(new Error('Your session is invalid or expired. Please log in again.'),{status:401});
+  if(adminSession&&portal!=='admin')throw Object.assign(new Error('Invalid portal session.'),{status:403});
+  const secret=String(process.env.INTERNAL_AUTH_SECRET||'').trim();
+  if(!secret)throw Object.assign(new Error('Account verification is temporarily unavailable.'),{status:503});
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),7000);
   let user;
-  if(adminSession){
-    if(portal!=='admin') throw Object.assign(new Error('Invalid portal session.'),{status:403});
-    user={
-      uid:adminSession.uid,
-      email:CFG.admin.email,
-      name:CFG.admin.name,
-      role:'admin',
-      status:'approved',
-      blocked:false
-    };
-  } else {
-    user={
-      uid:userSession.uid,
-      email:userSession.email,
-      name:userSession.name || 'User',
-      role:userSession.role,
-      status:'approved',
-      blocked:false
-    };
-  }
-
-  if(roles && !roles.includes(user.role)) {
-    throw Object.assign(new Error('Not authorized.'),{status:403});
-  }
-  if(user.role==='teacher' && user.status!=='approved') {
-    throw Object.assign(new Error('Teacher account is pending Admin approval.'),{status:403});
-  }
-
+  try{
+    const response=await fetch(SERVER1_URL+'/api/internal/auth/verify',{
+      method:'POST',
+      headers:{'Authorization':'Bearer '+token,'X-CEM-Portal':portal,'X-Internal-Auth':secret,'Accept':'application/json','Content-Type':'application/json'},
+      body:'{}',signal:controller.signal
+    });
+    const payload=await response.json().catch(()=>({}));
+    if(response.status===401||response.status===403)throw Object.assign(new Error(payload.error||'Your account is blocked, deleted, or no longer approved. Please contact the administrator.'),{status:response.status});
+    if(!response.ok||!payload.user||!payload.user.uid)throw Object.assign(new Error('Account verification is temporarily unavailable.'),{status:503});
+    user=payload.user;
+  }catch(err){
+    if(err.status)throw err;
+    console.error('[Auth] Server 1 authoritative verification failed:',err.name||'Error',String(err.message||'').slice(0,160));
+    throw Object.assign(new Error('Account verification is temporarily unavailable. Please retry.'),{status:503});
+  }finally{clearTimeout(timer);}
+  if((adminSession?adminSession.uid:userSession.uid)!==user.uid)throw Object.assign(new Error('Session identity mismatch. Please log in again.'),{status:401});
+  if(roles&&!roles.includes(user.role))throw Object.assign(new Error('Not authorized.'),{status:403});
+  if(user.blocked)throw Object.assign(new Error('Your account has been blocked. Contact the administrator.'),{status:403});
+  if(user.role==='teacher'&&user.status!=='approved')throw Object.assign(new Error('Teacher account is pending Admin approval.'),{status:403});
   return {uid:user.uid,decoded:user,user};
 }
 function requireRole(req, role) { return currentUser(req, [role]); }
@@ -515,21 +502,29 @@ async function activeSubscription(uidValue) {
 }
 
 async function server1ActiveSubscription(studentId) {
-  const secret=String(process.env.INTERNAL_AUTH_SECRET||'');
-  if(!secret) throw Object.assign(new Error('Premium access verification is temporarily unavailable.'),{status:503});
+  const secret=String(process.env.INTERNAL_AUTH_SECRET||'').trim();
+  if(!secret) {
+    console.error('[Premium] INTERNAL_AUTH_SECRET is missing on Server 2.');
+    throw Object.assign(new Error('Premium access verification is temporarily unavailable. Contact support.'),{status:503});
+  }
   const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(),5000);
+  const timer=setTimeout(()=>controller.abort(),7000);
   try {
-    const response=await fetch(SERVER1_URL+'/api/internal/subscription/active?studentId='+encodeURIComponent(studentId),{
+    const endpoint=SERVER1_URL+'/api/internal/subscription/active?studentId='+encodeURIComponent(String(studentId));
+    const response=await fetch(endpoint,{
       method:'GET',
-      headers:{'X-Internal-Auth':secret,'Accept':'application/json'},
+      headers:{'X-Internal-Auth':secret,'Accept':'application/json','User-Agent':'ExamMaster-PremiumCheck/1.0'},
       signal:controller.signal
     });
     const payload=await response.json().catch(()=>({}));
-    if(!response.ok || typeof payload.active!=='boolean') throw Object.assign(new Error('Premium access verification is temporarily unavailable.'),{status:503});
+    if(!response.ok || typeof payload.active!=='boolean') {
+      console.error('[Premium] Server 1 subscription lookup failed:',JSON.stringify({status:response.status,server1Url:SERVER1_URL,validPayload:typeof payload.active==='boolean'}));
+      throw Object.assign(new Error(response.status===403?'Premium access verification is misconfigured. Contact support.':'Premium access verification is temporarily unavailable. Please retry.'),{status:503});
+    }
     return payload.active===true;
   } catch(err) {
     if(err.status) throw err;
+    console.error('[Premium] Server 1 subscription request failed:',err.name||'Error',String(err.message||'').slice(0,160));
     throw Object.assign(new Error('Premium access verification is temporarily unavailable. Please retry in a moment.'),{status:503});
   } finally { clearTimeout(timer); }
 }
@@ -670,7 +665,7 @@ async function route(req, res) {
   const method = req.method;
   if (method==='OPTIONS') return send(res,204,{});
   if (process.env.SERVER_ROLE === 'exam' && !(url.pathname==='/api/health' || url.pathname==='/api/internal/auth/verify' || url.pathname==='/api/modules' || url.pathname.startsWith('/api/modules/') || url.pathname==='/api/tests' || url.pathname.startsWith('/api/tests/') || url.pathname==='/api/admin/ratings')) return send(res,404,{error:'This endpoint belongs to Server 1.'});
-  if (url.pathname.startsWith('/api/') && method!=='GET' && url.pathname!=='/api/webhook' && url.pathname!=='/api/internal/auth/verify') { await rateLimit(req,'api-global',180,60000); }
+  if (url.pathname.startsWith('/api/') && method!=='GET' && url.pathname!=='/api/webhook' && url.pathname!=='/api/internal/auth/verify') { await await rateLimit(req,'api-global',180,60000); }
 
   if (url.pathname==='/api/config' && method==='GET') {
     return send(res,200,{paymentEnabled:CFG.payment.enabled,paymentMode:CFG.payment.enabled?'test':null,authMode:'manual'});
@@ -680,7 +675,7 @@ async function route(req, res) {
   }
 
   if (url.pathname==='/api/admin/request-otp' && method==='POST') {
-    const b=await body(req), email=cleanEmail(b.email); await rateLimit(req,'admin-otp',5,900000,email);
+    const b=await body(req), email=cleanEmail(b.email); await await rateLimit(req,'admin-otp',5,900000,email);
     if(email!==CFG.admin.email) throw Object.assign(new Error('This email is not authorized for Admin access.'),{status:403});
     if(Date.now()-adminOtpState.sentAt < 60*1000) throw Object.assign(new Error('Please wait 60 seconds before requesting another OTP.'),{status:429});
     const otp=String(crypto.randomInt(100000,1000000));
@@ -704,7 +699,7 @@ async function route(req, res) {
   }
 
   if (url.pathname==='/api/admin/verify-otp' && method==='POST') {
-    const b=await body(req), email=cleanEmail(b.email), otp=String(b.otp||'').trim(); await rateLimit(req,'admin-otp-verify',10,900000,email);
+    const b=await body(req), email=cleanEmail(b.email), otp=String(b.otp||'').trim(); await await rateLimit(req,'admin-otp-verify',10,900000,email);
     if(email!==CFG.admin.email) throw Object.assign(new Error('This email is not authorized for Admin access.'),{status:403});
     if(!/^\d{6}$/.test(otp) || !adminOtpState.hash || Date.now()>adminOtpState.expiresAt) throw Object.assign(new Error('OTP is invalid or expired. Request a new OTP.'),{status:401});
     adminOtpState.attempts++;
@@ -728,7 +723,7 @@ async function route(req, res) {
   }
 
   if(url.pathname==='/api/auth/register/student'&&method==='POST'){
-    const b=await body(req),uidVal=uid('std-'),emailVal=cleanEmail(b.email); await rateLimit(req,'register-email',6,3600000,emailVal),name=String(b.name||'').trim(),mobile=String(b.mobile||'').trim(),password=String(b.password||'');
+    const b=await body(req),uidVal=uid('std-'),emailVal=cleanEmail(b.email); await await rateLimit(req,'register-email',6,3600000,emailVal),name=String(b.name||'').trim(),mobile=String(b.mobile||'').trim(),password=String(b.password||'');
     if(!name||!EMAIL_RE.test(emailVal)||!mobile||!MOBILE_RE.test(mobile))throw new Error('Please provide a valid name, email and mobile number.');
     if(password.length<8||!/[A-Z]/.test(password)||!/[a-z]/.test(password)||!/[0-9]/.test(password))throw new Error('Password must contain at least 8 characters with uppercase, lowercase and a number.');
     const users=Object.values(await allMap('users'));if(users.some(u=>cleanEmail(u.email)===emailVal))throw new Error('This email is already registered.');
@@ -736,7 +731,7 @@ async function route(req, res) {
     await set('users/'+uidVal,profile);return send(res,200,{message:'Student account created. Please sign in to continue.',user:publicUser(profile)});
   }
   if(url.pathname==='/api/auth/register/teacher'&&method==='POST'){
-    const b=await body(req),uidVal=uid('tch-'),emailVal=cleanEmail(b.email); await rateLimit(req,'register-email',6,3600000,emailVal),name=String(b.name||'').trim(),mobile=String(b.mobile||'').trim(),subject=String(b.subject||'').trim(),password=String(b.password||'');
+    const b=await body(req),uidVal=uid('tch-'),emailVal=cleanEmail(b.email); await await rateLimit(req,'register-email',6,3600000,emailVal),name=String(b.name||'').trim(),mobile=String(b.mobile||'').trim(),subject=String(b.subject||'').trim(),password=String(b.password||'');
     if(!name||!EMAIL_RE.test(emailVal)||!mobile||!subject||!MOBILE_RE.test(mobile))throw new Error('Please fill all fields with a valid mobile number.');
     if(password.length<8||!/[A-Z]/.test(password)||!/[a-z]/.test(password)||!/[0-9]/.test(password))throw new Error('Password must contain at least 8 characters with uppercase, lowercase and a number.');
     const users=Object.values(await allMap('users'));if(users.some(u=>cleanEmail(u.email)===emailVal))throw new Error('This email is already registered.');
@@ -744,7 +739,7 @@ async function route(req, res) {
     await set('users/'+uidVal,profile);return send(res,200,{message:'Registration submitted. Wait for Admin approval before logging in.',user:publicUser(profile)});
   }
   if(url.pathname==='/api/auth/login'&&method==='POST'){
-    const b=await body(req),email=cleanEmail(b.email),password=String(b.password||''); await rateLimit(req,'login-email',8,900000,email);if(!EMAIL_RE.test(email)||!password)throw Object.assign(new Error('Invalid email or password.'),{status:401});
+    const b=await body(req),email=cleanEmail(b.email),password=String(b.password||''); await await rateLimit(req,'login-email',8,900000,email);if(!EMAIL_RE.test(email)||!password)throw Object.assign(new Error('Invalid email or password.'),{status:401});
     const users=Object.values(await allMap('users')),user=users.find(u=>cleanEmail(u.email)===email);
     if(!user||!passwordMatches(password,user))throw Object.assign(new Error('Invalid email or password.'),{status:401});
     if(user.password&&!user.passwordHash){const upgraded={...user,passwordHash:hashPassword(password),updatedAt:nowIso()};delete upgraded.password;await set('users/'+user.uid,upgraded);Object.assign(user,upgraded);}
@@ -792,7 +787,7 @@ async function route(req, res) {
   }
 
   if(url.pathname==='/api/auth/forgot/request'&&method==='POST'){
-    const b=await body(req),email=cleanEmail(b.email); await rateLimit(req,'forgot-email',4,1800000,email);if(!EMAIL_RE.test(email))throw new Error('Enter a valid email address.');
+    const b=await body(req),email=cleanEmail(b.email); await await rateLimit(req,'forgot-email',4,1800000,email);if(!EMAIL_RE.test(email))throw new Error('Enter a valid email address.');
     const users=Object.values(await allMap('users')),user=users.find(u=>cleanEmail(u.email)===email);
     if(user){const otp=String(crypto.randomInt(100000,1000000));await set('passwordResets/'+user.uid,{hash:crypto.createHmac('sha256',AUTH_SESSION_SECRET).update(otp).digest('hex'),expiresAt:Date.now()+600000,attempts:0});const sent=await sendEmail(email,'Competitive Exam Master password reset',emailShell('Password reset','<p>Your password reset code is:</p><div style="font-size:32px;font-weight:800;letter-spacing:8px;padding:14px 0">'+otp+'</div><p>This code expires in 10 minutes.</p>'));if(!sent)throw Object.assign(new Error('Email delivery is unavailable right now.'),{status:503});}
     return send(res,200,{message:'If an account exists for that email, a reset code has been sent.'});
@@ -800,7 +795,7 @@ async function route(req, res) {
   if(url.pathname==='/api/auth/forgot/confirm'&&method==='POST'){
     const b=await body(req);
     const email=cleanEmail(b.email);
-    await rateLimit(req,'forgot-confirm-email',8,1800000,email);
+    await await rateLimit(req,'forgot-confirm-email',8,1800000,email);
     const otp=String(b.otp||'').trim();
     const newPassword=String(b.newPassword||'');
     const users=Object.values(await allMap('users'));
@@ -1241,7 +1236,7 @@ async function route(req, res) {
 
   if (url.pathname === '/api/verify' && method === 'POST') {
     const {uid:userId}=await requireRole(req,'student');
-    rateLimit(req,'payment-verify',10,600000,userId);
+    await rateLimit(req,'payment-verify',10,600000,userId);
     if (!CFG.payment.enabled) throw Object.assign(new Error('Razorpay Test Mode is not configured on the server.'),{status:503});
     const b = await body(req), oid = String(b.razorpay_order_id||''), pid = String(b.razorpay_payment_id||''), sig = String(b.razorpay_signature||'');
     const order = await get('orders/' + oid);
