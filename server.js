@@ -314,6 +314,7 @@ async function ensureSeeds() {
 const AUTH_SESSION_SECRET = process.env.AUTH_SESSION_SECRET || (process.env.NODE_ENV === 'production' ? '' : crypto.randomBytes(32).toString('hex'));
 const ADMIN_OTP_SECRET = process.env.ADMIN_OTP_SECRET || AUTH_SESSION_SECRET;
 if (process.env.NODE_ENV === 'production' && AUTH_SESSION_SECRET.length < 32) throw new Error('AUTH_SESSION_SECRET must be configured with at least 32 characters in production.');
+if (process.env.NODE_ENV === 'production' && String(process.env.INTERNAL_AUTH_SECRET||'').trim().length < 32) throw new Error('INTERNAL_AUTH_SECRET must be configured with at least 32 characters in production and match on both servers.');
 const ADMIN_OTP_TTL_MS = 10 * 60 * 1000;
 const adminOtpState = { hash:'', expiresAt:0, attempts:0, sentAt:0 };
 const rateBuckets = new Map();
