@@ -525,13 +525,29 @@ async function server1ActiveSubscription(studentId) {
   } finally { clearTimeout(timer); }
 }
 
+async function server1ApprovedPurchase(studentId,testId) {
+  const secret=String(process.env.INTERNAL_AUTH_SECRET||'').trim();
+  if(!secret)throw Object.assign(new Error('Purchase access verification is temporarily unavailable.'),{status:503});
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),7000);
+  try{
+    const endpoint=SERVER1_URL+'/api/internal/purchase/approved?studentId='+encodeURIComponent(String(studentId))+'&testId='+encodeURIComponent(String(testId));
+    const response=await fetch(endpoint,{method:'GET',headers:{'X-Internal-Auth':secret,'Accept':'application/json'},signal:controller.signal});
+    const payload=await response.json().catch(()=>({}));
+    if(!response.ok||typeof payload.approved!=='boolean')throw Object.assign(new Error('Purchase access verification is temporarily unavailable. Please retry.'),{status:503});
+    return payload.approved===true;
+  }catch(err){
+    if(err.status)throw err;
+    console.error('[Premium] Server 1 purchase lookup failed:',err.name||'Error',String(err.message||'').slice(0,160));
+    throw Object.assign(new Error('Purchase access verification is temporarily unavailable. Please retry.'),{status:503});
+  }finally{clearTimeout(timer);}
+}
+
 async function paidAccessBlocked(test, user) {
   if (test.type !== 'paid' || user.role !== 'student') return false;
   // Server 1 owns subscription/payment records; Server 2 has a separate RTDB.
   // Query the authoritative subscription source instead of trusting stale local copies.
   if (await server1ActiveSubscription(user.uid)) return false;
-  const purchases = Object.values(await allMap('purchases'));
-  return !purchases.some(p=>p.testId===test.id && p.studentId===user.uid && p.status==='approved');
+  return !(await server1ApprovedPurchase(user.uid,test.id));
 }
 
 async function attemptBlocked(test,user){
@@ -1125,7 +1141,7 @@ async function route(req, res) {
     if(!name||!Number.isFinite(days)||days<1||!Number.isFinite(price)||price<=0||Math.round(price*100)<1||Math.abs(Math.round(price*100)-price*100)>0.000001) throw new Error('Enter a valid plan with a price greater than ₹0 and at most two decimal places.');
     const p={id:uid('plan-'),name,days,price};
     await set('plans/'+p.id,p);
-    return send(res,200,{message:'Plan added.',plans:Object.values(plans)});
+    return send(res,200,{message:'Plan added.',plans:Object.values(await allMap('plans'))});
   }
 
   const mPlan=url.pathname.match(/^\/api\/plans\/([^/]+)$/);
