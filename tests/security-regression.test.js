@@ -46,6 +46,9 @@ if (path.basename(path.dirname(serverPath)) === 'render2') {
     assert.ok(source.includes("await update('examAttempts/'+attemptId,{status:'submitted',submissionId,submittedAt:existingSubmission.submittedAt||nowIso()});"));
     assert.ok(source.includes('async function server1ApprovedPurchase(studentId,testId)'));
     assert.ok(source.includes('/api/internal/purchase/approved?studentId='));
+    assert.ok(source.includes('/api/internal/tests/'));
+    assert.ok(source.includes("url.pathname==='/api/internal/backup'&&method==='GET'"));
+    assert.ok(source.includes("url.pathname==='/api/internal/modules'&&method==='DELETE'"));
   });
 } else {
   test('internal verification endpoints reject missing shared secrets', () => {
