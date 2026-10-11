@@ -1001,17 +1001,41 @@ async function route(req, res) {
     const {user}=await currentUser(req),tests=await allMap('tests'),t=tests[decodeURIComponent(mTest[1])];if(!t)throw new Error('Test not found.');
     if(await paidAccessBlocked(t,user))throw new Error('This is a Premium test series. Subscribe to Premium to access all paid test series.');
     const b=await body(req),attemptId=String(b.attemptId||'').trim();if(!/^[A-Za-z0-9_-]{24,100}$/.test(attemptId))throw Object.assign(new Error('This exam session is invalid or expired. Please reopen the test.'),{status:400});
-    const examAttempt=await get('examAttempts/'+attemptId);if(!examAttempt||examAttempt.testId!==t.id||examAttempt.userId!==user.uid||examAttempt.status!=='active')throw Object.assign(new Error('This exam session is invalid or already submitted. Please reopen the test.'),{status:409});
+    const examAttempt=await get('examAttempts/'+attemptId);
+    if(!examAttempt||examAttempt.testId!==t.id||examAttempt.userId!==user.uid)throw Object.assign(new Error('This exam session is invalid or expired. Please reopen the test.'),{status:409});
+    const submissionId='att-'+crypto.createHash('sha256').update(user.uid+'|'+t.id+'|'+attemptId).digest('hex').slice(0,40);
+    const existingSubmission=await get('submissions/'+submissionId);
+    if(existingSubmission)return send(res,200,await calculateResult(t,existingSubmission.answers||{},existingSubmission.timeBySubject||{},false,user,false,submissionId));
+    if(examAttempt.status!=='active')throw Object.assign(new Error('This exam session is already being submitted or has expired. Please reopen the test.'),{status:409});
     const now=Date.now(),expiresAt=new Date(examAttempt.expiresAt).getTime();if(!Number.isFinite(expiresAt)||now>expiresAt+15000)throw Object.assign(new Error('Exam time has expired. Your attempt can no longer be submitted.'),{status:409});
     const rawAnswers=b.answers&&typeof b.answers==='object'&&!Array.isArray(b.answers)?b.answers:{};const answers={};for(let i=0;i<t.questions.length;i++){const v=String(rawAnswers[i]??'').trim().toUpperCase();if(v&&/^[ABCD]$/.test(v))answers[i]=v;}
     const rawTimes=b.timeBySubject&&typeof b.timeBySubject==='object'&&!Array.isArray(b.timeBySubject)?b.timeBySubject:{};const timeBySubject={};for(const subj of (t.subjects||['General'])){const key=encodeFirebaseKey(subj),v=Number(rawTimes[subj]??rawTimes[key]);if(Number.isFinite(v)&&v>=0)timeBySubject[key]=Math.min(v,(Number(t.duration)||30)*60);}
-    const submissionId='att-'+crypto.createHash('sha256').update(user.uid+'|'+t.id+'|'+attemptId).digest('hex').slice(0,40);
     if(t.attemptPolicy==='once'&&user.role==='student'){
       const lockPath='attemptLocks/'+encodeURIComponent(t.id)+'/'+encodeURIComponent(user.uid);
-      if(db&&!useMemDb){const tx=await db.ref(lockPath).transaction(cur=>cur===null?{attemptId,submissionId,createdAt:nowIso()}:undefined,undefined,false);if(!tx.committed){const lock=tx.snapshot.val();if(lock?.submissionId===submissionId){const saved=await get('submissions/'+submissionId);if(saved)return send(res,200,await calculateResult(t,saved.answers||{},saved.timeBySubject||{},false,user,false));}throw Object.assign(new Error('You have already attempted this test. Only one attempt is allowed for this test series.'),{status:409});}}
-      else {const lock=await get(lockPath);if(lock){const saved=await get('submissions/'+submissionId);if(saved)return send(res,200,await calculateResult(t,saved.answers||{},saved.timeBySubject||{},false,user,false));throw Object.assign(new Error('You have already attempted this test. Only one attempt is allowed for this test series.'),{status:409});}await set(lockPath,{attemptId,submissionId,createdAt:nowIso()});}
+      if(db&&!useMemDb){const tx=await db.ref(lockPath).transaction(cur=>cur===null?{attemptId,submissionId,createdAt:nowIso()}:undefined,undefined,false);if(!tx.committed){const lock=tx.snapshot.val();if(lock?.submissionId===submissionId){const saved=await get('submissions/'+submissionId);if(saved)return send(res,200,await calculateResult(t,saved.answers||{},saved.timeBySubject||{},false,user,false,submissionId));}throw Object.assign(new Error('You have already attempted this test. Only one attempt is allowed for this test series.'),{status:409});}}
+      else {const lock=await get(lockPath);if(lock){const saved=await get('submissions/'+submissionId);if(saved)return send(res,200,await calculateResult(t,saved.answers||{},saved.timeBySubject||{},false,user,false,submissionId));throw Object.assign(new Error('You have already attempted this test. Only one attempt is allowed for this test series.'),{status:409});}await set(lockPath,{attemptId,submissionId,createdAt:nowIso()});}
     }
-    try{const result=await calculateResult(t,answers,timeBySubject,true,user,false,submissionId);examAttempt.status='submitted';examAttempt.submittedAt=nowIso();examAttempt.serverElapsedSeconds=Math.max(0,Math.min((now-new Date(examAttempt.startedAt).getTime())/1000,(Number(t.duration)||30)*60));await update('examAttempts/'+attemptId,examAttempt);return send(res,200,result);}catch(err){if(t.attemptPolicy==='once'&&user.role==='student')try{await remove('attemptLocks/'+encodeURIComponent(t.id)+'/'+encodeURIComponent(user.uid));}catch(_){}throw err;}
+    const claim=await transact('examAttempts/'+attemptId,current=>{
+      if(!current||current.testId!==t.id||current.userId!==user.uid||current.status!=='active')return;
+      return {...current,status:'submitting',submissionId,submitClaimedAt:nowIso()};
+    });
+    if(!claim.committed){
+      const saved=await get('submissions/'+submissionId);
+      if(saved)return send(res,200,await calculateResult(t,saved.answers||{},saved.timeBySubject||{},false,user,false,submissionId));
+      throw Object.assign(new Error('This exam attempt is already being submitted. Please wait a moment and retry.'),{status:409});
+    }
+    try{
+      const result=await calculateResult(t,answers,timeBySubject,true,user,false,submissionId);
+      await update('examAttempts/'+attemptId,{status:'submitted',submissionId,submittedAt:nowIso(),serverElapsedSeconds:Math.max(0,Math.min((now-new Date(examAttempt.startedAt).getTime())/1000,(Number(t.duration)||30)*60))});
+      return send(res,200,result);
+    }catch(err){
+      try{await transact('examAttempts/'+attemptId,current=>{
+        if(!current||current.status!=='submitting'||current.submissionId!==submissionId)return;
+        const restored={...current,status:'active'};delete restored.submissionId;delete restored.submitClaimedAt;return restored;
+      });}catch(resetErr){console.error('[Submit] Could not release exam-attempt claim:',resetErr.message);}
+      if(t.attemptPolicy==='once'&&user.role==='student')try{await remove('attemptLocks/'+encodeURIComponent(t.id)+'/'+encodeURIComponent(user.uid));}catch(_){}
+      throw err;
+    }
   }
 
   if(url.pathname==='/api/tests'&&method==='POST'){
