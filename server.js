@@ -1025,6 +1025,25 @@ async function route(req, res) {
     return send(res,200,{message:t.attemptPolicy==='once'?'Students can attempt this test only once.':'Students can reattempt this test.',test:summarizeTest(t)});
   }
 
+  // Repair older published tests whose questions were all stored as "General".
+  // Infer membership only when every configured section has an explicit target
+  // count and those counts account for every question; otherwise never guess.
+  function normalizeLegacyQuestionSections(test){
+    const questions=Array.isArray(test.questions)?test.questions:[];
+    const subjects=Array.isArray(test.subjects)?[...new Set(test.subjects.map(s=>String(s||'').trim()).filter(Boolean))]:[];
+    if(questions.length===0||subjects.length<2) return false;
+    if(!questions.every(q=>String(q.subject||'General').trim()==='General')) return false;
+    const counts=test.sectionQuestionCounts;
+    if(!counts||typeof counts!=='object'||Array.isArray(counts)) return false;
+    const targets=subjects.map(name=>({name,count:Number(counts[name])}));
+    if(targets.some(x=>!Number.isInteger(x.count)||x.count<1)||targets.reduce((sum,x)=>sum+x.count,0)!==questions.length) return false;
+    let index=0;
+    for(const target of targets){
+      for(let n=0;n<target.count;n++) questions[index++].subject=target.name;
+    }
+    return true;
+  }
+
   const mTest=url.pathname.match(/^\/api\/tests\/([^/]+)(?:\/(solution|submit|start))?$/);
   if(mTest && method==='GET' && !mTest[2]) {
     const {user}=await currentUser(req), tests=await allMap('tests'), t=tests[decodeURIComponent(mTest[1])];
@@ -1036,6 +1055,7 @@ async function route(req, res) {
   if(mTest && method==='POST' && mTest[2]==='start') {
     const {user}=await currentUser(req), tests=await allMap('tests'), t=tests[decodeURIComponent(mTest[1])];
     if(!t||!t.published) throw new Error('Test not found.');
+    if(normalizeLegacyQuestionSections(t)) await set('tests/'+t.id,t);
     if(await paidAccessBlocked(t,user)) throw Object.assign(new Error('This is a Premium test series. Subscribe to Premium to access all paid test series.'),{status:403});
     if(await attemptBlocked(t,user)) throw Object.assign(new Error('You have already attempted this test. Only one attempt is allowed for this test series.'),{status:409});
     const attemptId=crypto.randomBytes(24).toString('base64url'), startedAt=Date.now(), durationMs=Math.max(60000,Math.min(Number(t.duration)||30,1440)*60000);
