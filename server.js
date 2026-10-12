@@ -1505,7 +1505,7 @@ async function calculateResult(t, answers, timeBySubject, saveAttempt, user, sol
       if(given===q.answer){score+=Number(q.marks)||0;correct++;sec.correct++;outcome='correct';}
       else{score-=Number(q.negative)||0;incorrect++;sec.incorrect++;outcome='incorrect';}
     } else unattempted++;
-    return {index:i,question:q.question,options:q.options,correctAnswer:q.answer,givenAnswer:given,outcome,explanation:q.explanation||''};
+    return {index:i,question:q.question,options:q.options,instructions:q.instructions||'',correctAnswer:q.answer,givenAnswer:given,outcome,explanation:q.explanation||''};
   });
   score=Math.round(score*100)/100; const maxScore=Math.round(t.questions.reduce((s,q)=>s+(Number(q.marks)||0),0)*100)/100; const attempted=correct+incorrect; const accuracy=attempted?Math.round(correct/attempted*1000)/10:0;
   const timeForSubject=(subject)=>{const raw=timeBySubject&&typeof timeBySubject==='object'?timeBySubject:{}; const direct=raw[subject]; if(direct!==undefined)return Number(direct)||0; const encoded=encodeFirebaseKey(subject); return Number(raw[encoded]||0)||0;};
